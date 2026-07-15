@@ -1,5 +1,51 @@
 <#
 .SYNOPSIS
+    Returns the raw content of a WARA data source from a local file or a URI.
+
+.DESCRIPTION
+    The `Get-WAFDataSource` function returns the content of a data source that may be either a local
+    file path (preferred for disconnected / sovereign clouds such as USNAT) or an http(s) URI. If the
+    supplied value resolves to an existing file it is read from disk with `Get-Content -Raw`; otherwise,
+    if it looks like an http(s) URI it is downloaded with `Invoke-RestMethod`. This lets the module ship
+    (or point at) bundled copies of the APRL recommendation data without requiring internet access.
+
+.PARAMETER Source
+    A local file path or an http(s) URI to the data source.
+
+.OUTPUTS
+    System.String (file contents) or the deserialized object returned by Invoke-RestMethod.
+
+.EXAMPLE
+    PS> $json = Get-WAFDataSource -Source '.\offline-data\recommendations.json' | ConvertFrom-Json
+
+.EXAMPLE
+    PS> $csv = Get-WAFDataSource -Source 'https://internal.host/WARAinScopeResTypes.csv' | ConvertFrom-Csv
+
+.NOTES
+    Added for USNAT / air-gapped support. Reads local files without any network access.
+#>
+function Get-WAFDataSource {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string] $Source
+    )
+
+    if (Test-Path -LiteralPath $Source -PathType Leaf) {
+        Write-Debug "Get-WAFDataSource: reading local file: $Source"
+        return (Get-Content -LiteralPath $Source -Raw)
+    }
+    elseif ($Source -match '^https?://') {
+        Write-Debug "Get-WAFDataSource: downloading URI: $Source"
+        return (Invoke-RestMethod -Uri $Source)
+    }
+    else {
+        throw "Data source [$Source] is neither an existing file nor an http(s) URI."
+    }
+}
+
+<#
+.SYNOPSIS
     Invokes an Azure Resource Graph query.
 
 .DESCRIPTION
@@ -400,11 +446,43 @@ function Connect-WAFAzure {
         [GUID] $TenantID,
 
         [Parameter(Mandatory = $false)]
-        [string] $AzureEnvironment = 'AzureCloud'
+        [string] $AzureEnvironment
     )
 
-    # Connect To Azure Tenant
-    if ((Get-AzContext).Tenant.Id -ne $TenantID -or (Get-AzContext).Environment.Name -ne $AzureEnvironment) {
+    $currentContext = Get-AzContext
+
+    # Multi-sovereign support: if the caller does not specify an environment, inherit it from the
+    # existing Az context. This lets the module target ANY registered cloud (USNAT, USSec, USGov,
+    # China, commercial, ...) purely from the session the operator has already established, rather
+    # than hard-coding commercial endpoints. Endpoints are taken from Get-AzContext downstream.
+    if ([string]::IsNullOrWhiteSpace($AzureEnvironment)) {
+        if ($null -ne $currentContext -and -not [string]::IsNullOrWhiteSpace($currentContext.Environment.Name)) {
+            $AzureEnvironment = $currentContext.Environment.Name
+            Write-Debug "AzureEnvironment not supplied; inheriting from current context: $AzureEnvironment"
+        }
+        else {
+            $AzureEnvironment = 'AzureCloud'
+            Write-Debug 'AzureEnvironment not supplied and no context present; defaulting to AzureCloud.'
+        }
+    }
+
+    # A sovereign cloud (e.g. USNAT) must be registered with Az before it can be used. If the requested
+    # environment is unknown, stop with actionable guidance to register it (R6) instead of failing later
+    # with an opaque endpoint error.
+    $knownEnvironments = @((Get-AzEnvironment).Name)
+    if ($AzureEnvironment -notin $knownEnvironments) {
+        throw @"
+The Azure environment '$AzureEnvironment' is not registered in this PowerShell session.
+Sovereign clouds such as USNAT/USSec must be registered before connecting. Register it first, e.g.:
+
+    Add-AzEnvironment -Name '$AzureEnvironment' -ARMEndpoint '<https://management.your-sovereign-arm-host/>'
+
+Then re-run this command. Currently registered environments: $($knownEnvironments -join ', ')
+"@
+    }
+
+    # Connect only if not already connected to the requested tenant + environment.
+    if ($null -eq $currentContext -or $currentContext.Tenant.Id -ne $TenantID -or $currentContext.Environment.Name -ne $AzureEnvironment) {
         Write-Debug "Connecting to Azure Tenant with Tenant ID: $TenantID and Azure Environment: $AzureEnvironment"
         Connect-AzAccount -Tenant $TenantID -WarningAction SilentlyContinue -Environment $AzureEnvironment | Out-Null
     }

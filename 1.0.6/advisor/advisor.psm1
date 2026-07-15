@@ -290,7 +290,7 @@ class advisorResourceObj : IComparable, IEquatable[object] {
     Date: 2024-12-12
 #>
 Function Get-WAFAdvisorMetadata {
-    param($ResourceURL = "https://management.azure.com/" )
+    param($ResourceURL = ((Get-AzContext).Environment.ResourceManagerUrl) )
 
     # Get an access token for the Azure REST API
     $securetoken = Get-AzAccessToken -AsSecureString -ResourceUrl $ResourceURL -WarningAction SilentlyContinue
@@ -303,8 +303,9 @@ Function Get-WAFAdvisorMetadata {
         'Authorization' = 'Bearer ' + $token
     }
 
-    # Define the URI for the Advisor metadata
-    $AdvisorMetadataURI = $ResourceUrl+"providers/Microsoft.Advisor/metadata?api-version=2023-01-01" #&%24expand=ibiza will return the full metadata. Use this soon to pull in the long description.
+    # Define the URI for the Advisor metadata. TrimEnd guards against a missing/extra trailing slash
+    # on the sovereign ResourceManagerUrl (e.g. USNAT) so the URI is always well-formed.
+    $AdvisorMetadataURI = $ResourceUrl.TrimEnd('/') + "/providers/Microsoft.Advisor/metadata?api-version=2023-01-01" #&%24expand=ibiza will return the full metadata. Use this soon to pull in the long description.
 
     # Invoke the REST API to get the metadata
     $r = Invoke-RestMethod -Uri $AdvisorMetadataURI -Headers $authHeaders -Method Get

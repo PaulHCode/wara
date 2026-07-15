@@ -39,16 +39,19 @@
     Array of tags to include in the process. Validated using Test-WAFTagPattern.
 
 .PARAMETER AzureEnvironment
-    Specifies the Azure environment to use. Default is 'AzureCloud'. Valid values are 'AzureCloud', 'AzureUSGovernment', 'AzureGermanCloud', and 'AzureChinaCloud'.
+    Specifies the Azure environment to connect to. If omitted, the module inherits the environment of the current Az context (Get-AzContext), so it works against any registered sovereign cloud (e.g. USNAT, USSec, AzureUSGovernment) as well as the commercial cloud. Sovereign environments must be registered first with Add-AzEnvironment.
 
 .PARAMETER ConfigFile
     Path to the configuration file. This parameter is mandatory for the ConfigFileSet parameter set and validated using Test-Path.
 
 .PARAMETER RecommendationDataUri
-    URI for the recommendation data. Default is '"https://azure.github.io/WARA-Build/objects/recommendations.json"'.
+    Local file path (preferred for disconnected/sovereign clouds) or http(s) URI for the recommendation data. Defaults to the bundled copy under the module's offline-data folder.
 
 .PARAMETER RecommendationResourceTypesUri
-    URI for the recommendation resource types. Default is 'https://raw.githubusercontent.com/Azure/Azure-Proactive-Resiliency-Library-v2/refs/heads/main/tools/WARAinScopeResTypes.csv'.
+    Local file path (preferred for disconnected/sovereign clouds) or http(s) URI for the recommendation resource types CSV. Defaults to the bundled copy under the module's offline-data folder.
+
+.PARAMETER SkipVersionCheck
+    Skips the PowerShell Gallery version check. Useful in disconnected environments where the Gallery is unreachable.
 
 .PARAMETER UseImplicitRunbookSelectors
     Switch to enable the use of implicit runbook selectors.
@@ -133,7 +136,7 @@ function Start-WARACollector {
         [Parameter(ParameterSetName = 'Default')]
         [Parameter(ParameterSetName = 'Specialized')]
         [Parameter(ParameterSetName = 'ConfigFileSet')]
-        [string] $AzureEnvironment = 'AzureCloud',
+        [string] $AzureEnvironment = '',
 
         [Parameter(ParameterSetName = 'ConfigFileSet', Mandatory = $true)]
         [ValidateScript({ Test-Path $_ -PathType Leaf })]
@@ -142,30 +145,37 @@ function Start-WARACollector {
         [Parameter(ParameterSetName = 'Default')]
         [Parameter(ParameterSetName = 'Specialized')]
         [Parameter(ParameterSetName = 'ConfigFileSet')]
-        [ValidatePattern('^https:\/\/.+$')]
-        [string] $RecommendationDataUri = 'https://azure.github.io/WARA-Build/objects/recommendations.json',
+        [ValidateScript({ ($_ -match '^https?://') -or (Test-Path -LiteralPath $_ -PathType Leaf) })]
+        [string] $RecommendationDataUri = (Join-Path $PSScriptRoot 'offline-data/recommendations.json'),
 
         [Parameter(ParameterSetName = 'Default')]
         [Parameter(ParameterSetName = 'Specialized')]
         [Parameter(ParameterSetName = 'ConfigFileSet')]
-        [ValidatePattern('^https:\/\/.+$')]
-        [string] $RecommendationResourceTypesUri = 'https://azure.github.io/WARA-Build/objects/WARAinScopeResTypes.csv'
+        [ValidateScript({ ($_ -match '^https?://') -or (Test-Path -LiteralPath $_ -PathType Leaf) })]
+        [string] $RecommendationResourceTypesUri = (Join-Path $PSScriptRoot 'offline-data/WARAinScopeResTypes.csv'),
+
+        [Parameter(ParameterSetName = 'Default')]
+        [Parameter(ParameterSetName = 'Specialized')]
+        [Parameter(ParameterSetName = 'ConfigFileSet')]
+        [switch] $SkipVersionCheck
     )
 
-    # Check for module updates and throw an error if the module is out of date.
-    Write-Host 'Checking Version..' -ForegroundColor Cyan
-    $LocalVersion = (Get-Module -Name $MyInvocation.MyCommand.ModuleName).Version
-    $GalleryVersion = (Find-Module -Name $MyInvocation.MyCommand.ModuleName).Version
+    # Check for module updates. In disconnected / sovereign environments (e.g. USNAT) the PowerShell
+    # Gallery is not reachable, so this is best-effort only: it never throws, and can be bypassed
+    # entirely with -SkipVersionCheck.
+    if (-not $SkipVersionCheck) {
+        try {
+            Write-Host 'Checking Version..' -ForegroundColor Cyan
+            $LocalVersion = (Get-Module -Name $MyInvocation.MyCommand.ModuleName).Version
+            $GalleryVersion = (Find-Module -Name $MyInvocation.MyCommand.ModuleName -ErrorAction Stop).Version
 
-    if ($LocalVersion -lt $GalleryVersion) {
-        Write-Host "A newer version of the module is available. Please update the module to the latest version and re-run the command." -ForegroundColor Cyan
-        Write-Host "  1. Run 'Update-Module -Name $($MyInvocation.MyCommand.ModuleName)' to update the module to the latest version." -ForegroundColor Cyan
-        Write-Host "  2. Start a new PowerShell session. (Open a new PowerShell window/tab)" -ForegroundColor Cyan
-        Write-Host "  3. Re-run the command:" -ForegroundColor Cyan
-        Write-Host "     $($MyInvocation.Statement)" -ForegroundColor Cyan
-        Write-Host "Local Install Version            : $LocalVersion" -ForegroundColor Yellow
-        Write-Host "PowerShell Gallery Latest Version: $GalleryVersion" -ForegroundColor Green
-        throw 'Module is out of date.'
+            if ($LocalVersion -lt $GalleryVersion) {
+                Write-Warning "A newer version ($GalleryVersion) of $($MyInvocation.MyCommand.ModuleName) is available (installed: $LocalVersion). Consider updating with 'Update-Module -Name $($MyInvocation.MyCommand.ModuleName)'."
+            }
+        }
+        catch {
+            Write-Verbose "Version check skipped - module repository not reachable: $($_.Exception.Message)"
+        }
     }
 
     # Start the stopwatch to time the script
@@ -263,8 +273,9 @@ function Start-WARACollector {
 
     #Import Recommendation Object from WARA-Build GitHub Pages Site
     Write-Progress -Activity 'WARA Collector' -Status 'Importing APRL Recommendation Object from GitHub' -PercentComplete 5 -Id 1
-    Write-Debug 'Importing APRL Recommendation Object from GitHub'
-    $RecommendationObject = Invoke-RestMethod $RecommendationDataUri
+    Write-Debug 'Importing APRL Recommendation Object'
+    $RecommendationObject = Get-WAFDataSource -Source $RecommendationDataUri
+    if ($RecommendationObject -is [string]) { $RecommendationObject = $RecommendationObject | ConvertFrom-Json }
     Write-Debug "Count of APRL Recommendation Object: $($RecommendationObject.count)"
 
     #Create Recommendation Object HashTable for faster lookup
@@ -275,9 +286,9 @@ function Start-WARACollector {
     Write-Debug "Count of Recommendation Object Hashtable: $($RecommendationObjectHash.count)"
 
     #Import WARA InScope Resource Types CSV from APRL
-    Write-Debug 'Importing WARA InScope Resource Types CSV from GitHub'
+    Write-Debug 'Importing WARA InScope Resource Types CSV'
     Write-Progress -Activity 'WARA Collector' -Status 'Importing WARA InScope Resource Types CSV' -PercentComplete 11 -Id 1
-    $RecommendationResourceTypes = Invoke-RestMethod $RecommendationResourceTypesUri
+    $RecommendationResourceTypes = Get-WAFDataSource -Source $RecommendationResourceTypesUri
     $RecommendationResourceTypes = $RecommendationResourceTypes | ConvertFrom-Csv | Where-Object { $_.WARAinScope -eq 'yes' }
     Write-Debug "Count of WARA InScope Resource Types: $($RecommendationResourceTypes.count)"
 
@@ -297,7 +308,17 @@ function Start-WARACollector {
     Write-Debug 'Connecting to Azure if not connected.'
     Write-Progress -Activity 'WARA Collector' -Status 'Validating connection to Azure' -PercentComplete 20 -Id 1
     Connect-WAFAzure -TenantID $Scope_TenantId -AzureEnvironment $AzureEnvironment
+
+    # Resolve the effective environment name and ARM endpoint from the (now-established) context so the
+    # rest of the collector targets the correct sovereign endpoints regardless of which cloud we are in.
+    $AzureEnvironment = (Get-AzContext).Environment.Name
     $BaseURL = (Get-AzContext).Environment.ResourceManagerUrl
+    Write-Debug "Using Azure Environment: $AzureEnvironment  ResourceManagerUrl: $BaseURL"
+
+    # Track any optional data sources (Advisor / Resource Health / Support) that cannot be reached in the
+    # target cloud, so collection degrades gracefully and records the gap in the output instead of
+    # aborting the whole run (R2).
+    $collectionErrors = [System.Collections.Generic.List[object]]::new()
 
     #Get Implicit Subscription Ids from Scope
     Write-Debug 'Getting Implicit Subscription Ids from Scope'
@@ -400,19 +421,36 @@ function Start-WARACollector {
     #Get Advisor Metadata to include recommendations that are not in Advisor under 'HighAvailability'
     Write-Debug 'Getting Advisor Metadata'
     Write-Progress -Activity 'WARA Collector' -Status 'Getting Advisor Metadata' -PercentComplete 59 -Id 1
-    $AdvisorMetadata = Get-WAFAdvisorMetadata -ResourceURL $BaseURL
+    try {
+        $AdvisorMetadata = Get-WAFAdvisorMetadata -ResourceURL $BaseURL
+    }
+    catch {
+        $AdvisorMetadata = @()
+        $collectionErrors.Add([PSCustomObject]@{ Source = 'AdvisorMetadata'; Reachable = $false; Error = $_.Exception.Message })
+        Write-Warning "Advisor metadata could not be retrieved in this environment; continuing without it. ($($_.Exception.Message))"
+    }
     Write-Debug "Count of Advisor Metadata: $($AdvisorMetadata.count)"
 
     #Get Other Recommendations
     Write-Debug 'Getting Other Recommendations'
     Write-Progress -Activity 'WARA Collector' -Status 'Getting Other Recommendations' -PercentComplete 62 -Id 1
-    $OtherRecommendations = Get-WARAOtherRecommendations -RecommendationObject $RecommendationObject -AdvisorMetadata $AdvisorMetadata
+    $OtherRecommendations = if ($AdvisorMetadata) {
+        Get-WARAOtherRecommendations -RecommendationObject $RecommendationObject -AdvisorMetadata $AdvisorMetadata
+    }
+    else { @() }
     Write-Debug "Count of Other Recommendations: $($OtherRecommendations.count)"
 
     #Get Advisor Recommendations
     Write-Debug 'Getting Advisor Recommendations'
     Write-Progress -Activity 'WARA Collector' -Status 'Getting Advisor Recommendations' -PercentComplete 65 -Id 1
-    $advisorResourceObj = Get-WAFAdvisorRecommendation -AdditionalRecommendationIds $OtherRecommendations -SubscriptionIds $Scope_ImplicitSubscriptionIds.replace('/subscriptions/', '') -HighAvailability
+    try {
+        $advisorResourceObj = Get-WAFAdvisorRecommendation -AdditionalRecommendationIds $OtherRecommendations -SubscriptionIds $Scope_ImplicitSubscriptionIds.replace('/subscriptions/', '') -HighAvailability
+    }
+    catch {
+        $advisorResourceObj = @()
+        $collectionErrors.Add([PSCustomObject]@{ Source = 'AdvisorRecommendations'; Reachable = $false; Error = $_.Exception.Message })
+        Write-Warning "Advisor recommendations could not be retrieved in this environment; continuing without them. ($($_.Exception.Message))"
+    }
     Write-Debug "Count of Advisor Recommendations: $($advisorResourceObj.count)"
 
     #Prior to filtering, capture all "global" recommendations that are microsoft.subscriptions/subscriptions since these get filtered out.
@@ -493,22 +531,50 @@ function Start-WARACollector {
     #Get Azure Outages
     Write-Debug 'Getting Azure Outages'
     Write-Progress -Activity 'WARA Collector' -Status 'Getting Azure Outages' -PercentComplete 81 -Id 1
-    $outageResourceObj = Get-WAFOldOutage -SubscriptionIds $Scope_ImplicitSubscriptionIds.replace('/subscriptions/', '')
+    try {
+        $outageResourceObj = Get-WAFOldOutage -SubscriptionIds $Scope_ImplicitSubscriptionIds.replace('/subscriptions/', '')
+    }
+    catch {
+        $outageResourceObj = @()
+        $collectionErrors.Add([PSCustomObject]@{ Source = 'Outages'; Reachable = $false; Error = $_.Exception.Message })
+        Write-Warning "Azure outages (Microsoft.ResourceHealth) could not be retrieved; continuing without them. ($($_.Exception.Message))"
+    }
 
     #Get Azure Retirements
     Write-Debug 'Getting Azure Retirements'
     Write-Progress -Activity 'WARA Collector' -Status 'Getting Azure Retirements' -PercentComplete 84 -Id 1
-    $retirementResourceObj = Get-WAFResourceRetirement -SubscriptionIds $Scope_ImplicitSubscriptionIds.replace('/subscriptions/', '')
+    try {
+        $retirementResourceObj = Get-WAFResourceRetirement -SubscriptionIds $Scope_ImplicitSubscriptionIds.replace('/subscriptions/', '')
+    }
+    catch {
+        $retirementResourceObj = @()
+        $collectionErrors.Add([PSCustomObject]@{ Source = 'Retirements'; Reachable = $false; Error = $_.Exception.Message })
+        Write-Warning "Azure retirements (Microsoft.ResourceHealth) could not be retrieved; continuing without them. ($($_.Exception.Message))"
+    }
 
     #Get Azure Support Tickets
     Write-Debug 'Getting Azure Support Tickets'
     Write-Progress -Activity 'WARA Collector' -Status 'Getting Azure Support Tickets' -PercentComplete 87 -Id 1
-    $supportTicketObjects = Get-WAFSupportTicket -SubscriptionIds $Scope_ImplicitSubscriptionIds.replace('/subscriptions/', '')
+    try {
+        $supportTicketObjects = Get-WAFSupportTicket -SubscriptionIds $Scope_ImplicitSubscriptionIds.replace('/subscriptions/', '')
+    }
+    catch {
+        $supportTicketObjects = @()
+        $collectionErrors.Add([PSCustomObject]@{ Source = 'SupportTickets'; Reachable = $false; Error = $_.Exception.Message })
+        Write-Warning "Azure support tickets (Microsoft.Support) could not be retrieved; continuing without them. ($($_.Exception.Message))"
+    }
 
     #Get Azure Service Health
     Write-Debug 'Getting Azure Service Health'
     Write-Progress -Activity 'WARA Collector' -Status 'Getting Azure Service Health' -PercentComplete 90 -Id 1
-    $serviceHealthObjects = Get-WAFServiceHealth -SubscriptionIds $Scope_ImplicitSubscriptionIds.replace('/subscriptions/', '')
+    try {
+        $serviceHealthObjects = Get-WAFServiceHealth -SubscriptionIds $Scope_ImplicitSubscriptionIds.replace('/subscriptions/', '')
+    }
+    catch {
+        $serviceHealthObjects = @()
+        $collectionErrors.Add([PSCustomObject]@{ Source = 'ServiceHealth'; Reachable = $false; Error = $_.Exception.Message })
+        Write-Warning "Azure service health alerts could not be retrieved; continuing without them. ($($_.Exception.Message))"
+    }
 
     $stopWatch.Stop()
     Write-Debug "Elapsed Time: $($stopWatch.Elapsed.toString('hh\:mm\:ss'))"
@@ -552,6 +618,7 @@ function Start-WARACollector {
         supportTickets      = $supportTicketObjects
         serviceHealth       = $serviceHealthObjects
         resourceInventory   = $ResourceInventory
+        collectionErrors    = $collectionErrors
     }
 
     Write-Debug 'Output JSON'

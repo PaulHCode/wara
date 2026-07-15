@@ -159,8 +159,9 @@ $TableStyle = 'Light19'
     Write-Host " Module.."
     $ImportExcel = Get-Module -Name ImportExcel -ListAvailable -ErrorAction silentlycontinue
     if ($null -eq $ImportExcel) {
-      Write-Host "Installing ImportExcel Module" -ForegroundColor Yellow
-      Install-Module -Name ImportExcel -Force -SkipPublisherCheck
+      # Do not auto-install from the PowerShell Gallery: it is unreachable in disconnected/sovereign
+      # environments and ImportExcel is not a Microsoft-authored module. Pre-stage it instead.
+      throw "The 'ImportExcel' module is required by the report generator but is not installed. In a disconnected environment, pre-stage it on a connected host (Save-Module -Name ImportExcel -Path <folder>) and copy it onto a PSModulePath directory, or install it from an internal PSRepository."
     }
   }
 

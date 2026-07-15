@@ -27,16 +27,16 @@ https://github.com/Azure/Azure-Proactive-Resiliency-Library-v2
 #>
 
 Param(
-[ValidatePattern('^https:\/\/.+$')]
-[string] $RecommendationDataUri = 'https://azure.github.io/WARA-Build/objects/recommendations.json',
+[ValidateScript({ ($_ -match '^https?://') -or (Test-Path -LiteralPath $_ -PathType Leaf) })]
+[string] $RecommendationDataUri = (Join-Path $PSScriptRoot '../offline-data/recommendations.json'),
 [string] $CustomRecommendationObject,
 [Parameter(mandatory = $true)]
 [string] $JSONFile,
 [string] $ExpertAnalysisFile
 )
 
-# WARA In Scope Resource Types CSV File
-$RecommendationResourceTypesUri = 'https://azure.github.io/WARA-Build/objects/WARAinScopeResTypes.csv'
+# WARA In Scope Resource Types CSV File (bundled copy by default; pass an http(s) URI to override)
+$RecommendationResourceTypesUri = (Join-Path $PSScriptRoot '../offline-data/WARAinScopeResTypes.csv')
 
 # Check if the Expert-Analysis file exists
 $ExpertAnalysisPath = $PSScriptRoot + '\Expert-Analysis-v1.xlsx'
@@ -160,8 +160,9 @@ function Test-Requirement {
 	Write-Host ' Module..'
 	$ImportExcel = Get-Module -Name ImportExcel -ListAvailable -ErrorAction silentlycontinue
 	if ($null -eq $ImportExcel) {
-		Write-Host 'Installing ImportExcel Module' -ForegroundColor Yellow
-		Install-Module -Name ImportExcel -Force -SkipPublisherCheck
+		# Do not auto-install from the PowerShell Gallery: it is unreachable in disconnected/sovereign
+		# environments and ImportExcel is not a Microsoft-authored module. Pre-stage it instead.
+		throw "The 'ImportExcel' module is required by the analyzer but is not installed. In a disconnected environment, pre-stage it on a connected host (Save-Module -Name ImportExcel -Path <folder>) and copy it onto a PSModulePath directory, or install it from an internal PSRepository."
 	}
 <# 	Write-Host 'Validating ' -NoNewline
 	Write-Host 'Powershell-YAML' -ForegroundColor Cyan -NoNewline
@@ -224,8 +225,13 @@ function Get-WARARecommendationList
         [string]$RecommendationDataUri
     )
 	Write-Debug ((get-date -Format 'yyyy-MM-dd HH:mm:ss') + ' - Processing Recommendations from JSON file.')
-	# Get Recommendation Objects
-    $RecommendationObject = Invoke-RestMethod $RecommendationDataUri
+	# Get Recommendation Objects (local file preferred for disconnected environments; http(s) URI supported)
+    if (Test-Path -LiteralPath $RecommendationDataUri -PathType Leaf) {
+        $RecommendationObject = Get-Content -LiteralPath $RecommendationDataUri -Raw | ConvertFrom-Json
+    }
+    else {
+        $RecommendationObject = Invoke-RestMethod $RecommendationDataUri
+    }
 
 	return $RecommendationObject
 
@@ -1162,7 +1168,8 @@ $JSONContent = Read-JSONFile -JSONFile $JSONFile
 
 Write-Debug ((get-date -Format 'yyyy-MM-dd HH:mm:ss') + ' - Importing Supported Types')
 # Importing the CSV files to get the supported types and the friendly names for the resource types in the Retirements
-$RootTypes = Invoke-RestMethod $RecommendationResourceTypesUri | ConvertFrom-Csv
+$RootTypes = if (Test-Path -LiteralPath $RecommendationResourceTypesUri -PathType Leaf) { Get-Content -LiteralPath $RecommendationResourceTypesUri -Raw } else { Invoke-RestMethod $RecommendationResourceTypesUri }
+$RootTypes = $RootTypes | ConvertFrom-Csv
 $RootTypes = $RootTypes | Where-Object {$_.InAprlAndOrAdvisor -eq 'yes'}
 
 Write-Host 'Analysing Excel File Template'
