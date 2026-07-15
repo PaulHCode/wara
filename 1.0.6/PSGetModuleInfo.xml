@@ -1,0 +1,213 @@
+<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">
+  <Obj RefId="0">
+    <TN RefId="0">
+      <T>Microsoft.PowerShell.Commands.PSRepositoryItemInfo</T>
+      <T>System.Management.Automation.PSCustomObject</T>
+      <T>System.Object</T>
+    </TN>
+    <MS>
+      <S N="Name">wara</S>
+      <Version N="Version">1.0.6</Version>
+      <S N="Type">Module</S>
+      <S N="Description">This module contains functions related to the Azure Well-Architected Reliability Assessment (WARA) service.</S>
+      <S N="Author">Microsoft Corporation</S>
+      <Obj N="CompanyName" RefId="1">
+        <TN RefId="1">
+          <T>System.Object[]</T>
+          <T>System.Array</T>
+          <T>System.Object</T>
+        </TN>
+        <LST>
+          <S>takeshi-katano</S>
+          <S>arthurclares</S>
+        </LST>
+      </Obj>
+      <S N="Copyright">(c) Microsoft Corporation. All rights reserved.</S>
+      <DT N="PublishedDate">2025-05-22T15:02:50-04:00</DT>
+      <Obj N="InstalledDate" RefId="2">
+        <DT>2026-07-15T16:27:49.7713234-04:00</DT>
+        <MS>
+          <Obj N="DisplayHint" RefId="3">
+            <TN RefId="2">
+              <T>Microsoft.PowerShell.Commands.DisplayHintType</T>
+              <T>System.Enum</T>
+              <T>System.ValueType</T>
+              <T>System.Object</T>
+            </TN>
+            <ToString>DateTime</ToString>
+            <I32>2</I32>
+          </Obj>
+        </MS>
+      </Obj>
+      <Nil N="UpdatedDate" />
+      <URI N="LicenseUri">https://github.com/Azure/Well-Architected-Reliability-Assessment/blob/main/LICENSE</URI>
+      <URI N="ProjectUri">https://github.com/Azure/Well-Architected-Reliability-Assessment</URI>
+      <Nil N="IconUri" />
+      <Obj N="Tags" RefId="4">
+        <TNRef RefId="1" />
+        <LST>
+          <S>Azure</S>
+          <S>WAF</S>
+          <S>Well-ArchitectedFramework</S>
+          <S>WARA</S>
+          <S>Well-ArchitectedReliabilityAssessment</S>
+          <S>PSModule</S>
+          <S>PSEdition_Core</S>
+        </LST>
+      </Obj>
+      <Obj N="Includes" RefId="5">
+        <TN RefId="3">
+          <T>System.Collections.Hashtable</T>
+          <T>System.Object</T>
+        </TN>
+        <DCT>
+          <En>
+            <S N="Key">Workflow</S>
+            <Obj N="Value" RefId="6">
+              <TNRef RefId="1" />
+              <LST />
+            </Obj>
+          </En>
+          <En>
+            <S N="Key">Function</S>
+            <Obj N="Value" RefId="7">
+              <TNRef RefId="1" />
+              <LST>
+                <S>Start-WARACollector</S>
+                <S>Start-WARAAnalyzer</S>
+                <S>Start-WARAReport</S>
+                <S>Get-RunbookSchema</S>
+                <S>New-RunbookRecommendation</S>
+                <S>New-Recommendation</S>
+                <S>New-Runbook</S>
+                <S>New-RunbookCheckSet</S>
+                <S>New-RunbookCheck</S>
+                <S>Invoke-WAFQuery</S>
+                <S>Read-RunbookFile</S>
+                <S>Write-RunbookFile</S>
+                <S>Test-RunbookFile</S>
+                <S>Connect-WAFAzure</S>
+                <S>Build-RunbookQueries</S>
+                <S>Build-RunbookSelectorReview</S>
+              </LST>
+            </Obj>
+          </En>
+          <En>
+            <S N="Key">Cmdlet</S>
+            <Ref N="Value" RefId="6" />
+          </En>
+          <En>
+            <S N="Key">RoleCapability</S>
+            <Ref N="Value" RefId="6" />
+          </En>
+          <En>
+            <S N="Key">DscResource</S>
+            <Ref N="Value" RefId="6" />
+          </En>
+          <En>
+            <S N="Key">Command</S>
+            <Obj N="Value" RefId="8">
+              <TNRef RefId="1" />
+              <LST>
+                <S>Start-WARACollector</S>
+                <S>Start-WARAAnalyzer</S>
+                <S>Start-WARAReport</S>
+                <S>Get-RunbookSchema</S>
+                <S>New-RunbookRecommendation</S>
+                <S>New-Recommendation</S>
+                <S>New-Runbook</S>
+                <S>New-RunbookCheckSet</S>
+                <S>New-RunbookCheck</S>
+                <S>Invoke-WAFQuery</S>
+                <S>Read-RunbookFile</S>
+                <S>Write-RunbookFile</S>
+                <S>Test-RunbookFile</S>
+                <S>Connect-WAFAzure</S>
+                <S>Build-RunbookQueries</S>
+                <S>Build-RunbookSelectorReview</S>
+              </LST>
+            </Obj>
+          </En>
+        </DCT>
+      </Obj>
+      <Nil N="PowerShellGetFormatVersion" />
+      <Nil N="ReleaseNotes" />
+      <Obj N="Dependencies" RefId="9">
+        <TNRef RefId="1" />
+        <LST>
+          <Obj RefId="10">
+            <TN RefId="4">
+              <T>System.Collections.Specialized.OrderedDictionary</T>
+              <T>System.Object</T>
+            </TN>
+            <DCT>
+              <En>
+                <S N="Key">Name</S>
+                <S N="Value">Az.Accounts</S>
+              </En>
+              <En>
+                <S N="Key">MinimumVersion</S>
+                <S N="Value">3.0.0</S>
+              </En>
+              <En>
+                <S N="Key">CanonicalId</S>
+                <S N="Value">nuget:Az.Accounts/3.0.0</S>
+              </En>
+            </DCT>
+          </Obj>
+          <Obj RefId="11">
+            <TNRef RefId="4" />
+            <DCT>
+              <En>
+                <S N="Key">Name</S>
+                <S N="Value">Az.ResourceGraph</S>
+              </En>
+              <En>
+                <S N="Key">MinimumVersion</S>
+                <S N="Value">1.0.0</S>
+              </En>
+              <En>
+                <S N="Key">CanonicalId</S>
+                <S N="Value">nuget:Az.ResourceGraph/1.0.0</S>
+              </En>
+            </DCT>
+          </Obj>
+        </LST>
+      </Obj>
+      <S N="RepositorySourceLocation">https://www.powershellgallery.com/api/v2</S>
+      <S N="Repository">PSGallery</S>
+      <S N="PackageManagementProvider">NuGet</S>
+      <Obj N="AdditionalMetadata" RefId="12">
+        <TN RefId="5">
+          <T>System.Management.Automation.PSCustomObject</T>
+          <T>System.Object</T>
+        </TN>
+        <MS>
+          <S N="copyright">(c) Microsoft Corporation. All rights reserved.</S>
+          <S N="description">This module contains functions related to the Azure Well-Architected Reliability Assessment (WARA) service.</S>
+          <S N="requireLicenseAcceptance">False</S>
+          <S N="isLatestVersion">True</S>
+          <S N="isAbsoluteLatestVersion">True</S>
+          <S N="versionDownloadCount">4738</S>
+          <S N="downloadCount">7272</S>
+          <S N="packageSize">5832146</S>
+          <S N="published">5/22/2025 3:02:50 PM -04:00</S>
+          <S N="created">5/22/2025 3:02:50 PM -04:00</S>
+          <S N="lastUpdated">7/15/2026 8:20:01 PM -04:00</S>
+          <S N="tags">Azure WAF Well-ArchitectedFramework WARA Well-ArchitectedReliabilityAssessment PSModule PSEdition_Core PSFunction_Start-WARACollector PSCommand_Start-WARACollector PSFunction_Start-WARAAnalyzer PSCommand_Start-WARAAnalyzer PSFunction_Start-WARAReport PSCommand_Start-WARAReport PSFunction_Get-RunbookSchema PSCommand_Get-RunbookSchema PSFunction_New-RunbookRecommendation PSCommand_New-RunbookRecommendation PSFunction_New-Recommendation PSCommand_New-Recommendation PSFunction_New-Runbook PSCommand_New-Runbook PSFunction_New-RunbookCheckSet PSCommand_New-RunbookCheckSet PSFunction_New-RunbookCheck PSCommand_New-RunbookCheck PSFunction_Invoke-WAFQuery PSCommand_Invoke-WAFQuery PSFunction_Read-RunbookFile PSCommand_Read-RunbookFile PSFunction_Write-RunbookFile PSCommand_Write-RunbookFile PSFunction_Test-RunbookFile PSCommand_Test-RunbookFile PSFunction_Connect-WAFAzure PSCommand_Connect-WAFAzure PSFunction_Build-RunbookQueries PSCommand_Build-RunbookQueries PSFunction_Build-RunbookSelectorReview PSCommand_Build-RunbookSelectorReview PSIncludes_Function</S>
+          <S N="developmentDependency">False</S>
+          <S N="updated">2026-07-15T20:20:01Z</S>
+          <S N="NormalizedVersion">1.0.6</S>
+          <S N="Authors">Microsoft Corporation</S>
+          <S N="IsPrerelease">false</S>
+          <S N="ItemType">Module</S>
+          <S N="FileList">wara.nuspec|reports\reports.psd1|wara.psd1|reports\reports.psm1|wara.psm1|retirement\retirement.psd1|advisor\advisor.psd1|retirement\retirement.psm1|advisor\advisor.psm1|runbook\runbook.classes.ps1|analyzer\2_wara_data_analyzer.ps1|runbook\runbook.psd1|analyzer\analyzer.psd1|runbook\runbook.psm1|analyzer\analyzer.psm1|scope\scope.psd1|analyzer\Expert-Analysis-v1.xlsx|scope\scope.psm1|collector\collector.psd1|servicehealth\servicehealth.psd1|collector\collector.psm1|servicehealth\servicehealth.psm1|outage\outage.psd1|support\support.psd1|outage\outage.psm1|support\support.psm1|reports\3_wara_reports_generator.ps1|utils\utils.psd1|reports\Assessment-Findings-Report-v1.xlsx|utils\utils.psm1|reports\Mandatory - Executive Summary presentation - Template.pptx</S>
+          <S N="GUID">a6fbf19e-af5d-4c70-92f6-f96432aba2dd</S>
+          <S N="PowerShellVersion">7.4</S>
+          <S N="CompanyName">Microsoft Corporation</S>
+        </MS>
+      </Obj>
+      <S N="InstalledLocation">C:\Users\pauharri\OneDrive - Microsoft\Documents\PowerShell\Modules\wara\1.0.6</S>
+    </MS>
+  </Obj>
+</Objs>
