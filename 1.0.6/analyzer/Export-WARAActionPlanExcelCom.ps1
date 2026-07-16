@@ -653,97 +653,6 @@ function Initialize-WARAWorkloadInventory {
 }
 #endregion
 
-#region ------------------------------------------------------------ COM writer helpers
-# Writes header row + data block for one sheet, creates the table, and sets any formula cells
-# (values that start with '=') AFTER the table exists so structured references resolve.
-function Write-WARASheet {
-    param(
-        $Worksheet,
-        [int]$StartRow,
-        [string[]]$Columns,
-        [object[]]$Rows,
-        [string]$TableName,
-        [string]$TableStyle = 'TableStyleLight19'
-    )
-
-    $colCount = $Columns.Count
-    $dataCount = @($Rows).Count
-    if ($dataCount -lt 1) { $dataCount = 1 }   # always at least one (blank) data row so the table is valid
-
-    # Clear any stale example content in the data region (values only; keep template formatting).
-    $clearLast = $StartRow + [Math]::Max($dataCount, 3000)
-    $Worksheet.Range($Worksheet.Cells.Item($StartRow, 1), $Worksheet.Cells.Item($clearLast, $colCount)).ClearContents() | Out-Null
-
-    # Header row (convert ImportExcel line-break token to a real newline for display).
-    for ($c = 0; $c -lt $colCount; $c++) {
-        $Worksheet.Cells.Item($StartRow, $c + 1).Value2 = ($Columns[$c] -replace '_x000a_', "`n")
-    }
-
-    # Build a 2D value block; remember formula cells to set after the table exists.
-    $formulaCells = New-Object System.Collections.Generic.List[object]
-    $block = New-Object 'object[,]' $dataCount, $colCount
-    for ($r = 0; $r -lt @($Rows).Count; $r++) {
-        $row = $Rows[$r]
-        for ($c = 0; $c -lt $colCount; $c++) {
-            $val = $row.$($Columns[$c])
-            if ($val -is [string] -and $val.StartsWith('=')) {
-                $formulaCells.Add([PSCustomObject]@{ R = $StartRow + 1 + $r; C = $c + 1; F = $val })
-                $block[$r, $c] = $null
-            }
-            else {
-                if ($null -ne $val -and $val -isnot [string]) { $val = [string]$val }
-                $block[$r, $c] = $val
-            }
-        }
-    }
-    if (@($Rows).Count -ge 1) {
-        $topLeft = $Worksheet.Cells.Item($StartRow + 1, 1)
-        $botRight = $Worksheet.Cells.Item($StartRow + @($Rows).Count, $colCount)
-        # Use .Value (not .Value2): the Value2 property-put fails to marshal a 2D
-        # object[,] array in PowerShell COM ("Unable to cast object[,] to String").
-        $dataRange = $Worksheet.Range($topLeft, $botRight)
-        $dataRange.Value = $block
-    }
-
-    # Create (or replace) the table over header + data rows.
-    $lastRow = $StartRow + $dataCount
-    $tblRange = $Worksheet.Range($Worksheet.Cells.Item($StartRow, 1), $Worksheet.Cells.Item($lastRow, $colCount))
-    foreach ($existing in @($Worksheet.ListObjects)) {
-        if ($existing.Name -eq $TableName) { $existing.Unlist() }
-    }
-    $lo = $Worksheet.ListObjects.Add(1, $tblRange, $null, 1)   # xlSrcRange, headers = xlYes
-    $lo.Name = $TableName
-    try { $lo.TableStyle = $TableStyle } catch { Write-Verbose "TableStyle '$TableStyle' not applied: $($_.Exception.Message)" }
-
-    # Now set formula cells (table exists, so TableTypes8[[#This Row],...] structured refs resolve).
-    foreach ($fc in $formulaCells) {
-        try { $Worksheet.Cells.Item($fc.R, $fc.C).Formula2 = $fc.F }
-        catch {
-            try { $Worksheet.Cells.Item($fc.R, $fc.C).Formula = $fc.F }
-            catch { Write-Verbose "Formula not set at R$($fc.R)C$($fc.C): $($_.Exception.Message)" }
-        }
-    }
-
-    return [PSCustomObject]@{ LastRow = $lastRow; ColCount = $colCount }
-}
-
-function Set-WARAListValidation {
-    param($Worksheet, [string]$ColumnLetter, [int]$FirstRow, [string[]]$Values)
-    $rng = $Worksheet.Range("$ColumnLetter$FirstRow`:$ColumnLetter`1048576")
-    $rng.Validation.Delete()
-    # 3 = xlValidateList, 1 = xlValidAlertStop
-    $rng.Validation.Add(3, 1, 1, ($Values -join ',')) | Out-Null
-}
-
-function Set-WARALengthValidation {
-    param($Worksheet, [string]$ColumnLetter, [int]$FirstRow)
-    $rng = $Worksheet.Range("$ColumnLetter$FirstRow`:$ColumnLetter`1048576")
-    $rng.Validation.Delete()
-    # 6 = xlValidateTextLength, 1 = xlValidAlertStop, 5 = xlGreater
-    $rng.Validation.Add(6, 1, 5, '1') | Out-Null
-}
-#endregion
-
 #region ------------------------------------------------------------ Main
 Write-Host 'WARA Action Plan (Excel COM) generator' -ForegroundColor Magenta
 
@@ -791,84 +700,214 @@ $colsPlatform = @('REQUIRED ACTIONS / REVIEW STATUS','Tracking ID','Event Type',
 $colsSupport = @('REQUIRED ACTIONS / REVIEW STATUS','Ticket ID','Severity','Status','Support Plan Type','Creation Date','Modified Date','Title','Related Resource')
 $colsInventory = @('id','name','type','tenantId','kind','location','resourceGroup','subscriptionId','managedBy','sku','plan','zones')
 
-Get-Process EXCEL -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -eq '' } | Out-Null
+# ---------------------------------------------------------------------------------------------
+# The Excel COM work runs inside this scriptblock. In normal (hidden) mode it executes in a
+# short-lived background job -- its own PowerShell process -- which isolates the COM automation
+# from the caller's session. The worker records the PID of the Excel instance it spawns and, as
+# its final step, terminates ONLY that exact /automation process (a graceful Quit is attempted
+# first but does not reliably close Excel on every machine). Because the target is identified by
+# the specific spawned PID and re-confirmed to be an /automation instance, a user's manually
+# opened Excel window is never touched.
+# For -ShowExcel we run the same scriptblock in-process so the window stays open for inspection.
+# ---------------------------------------------------------------------------------------------
+$comWork = {
+    param($P)
+    $ErrorActionPreference = 'Stop'
 
-Write-Host 'Opening Excel (COM)...' -ForegroundColor Cyan
-$excelPidsBefore = @(Get-Process EXCEL -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
-$excel = New-Object -ComObject Excel.Application
-# Identify the PID of the instance we just spawned so we can guarantee its cleanup.
-$ownExcelPid = @(Get-Process EXCEL -ErrorAction SilentlyContinue | Where-Object { $_.Id -notin $excelPidsBefore } | Select-Object -ExpandProperty Id) | Select-Object -First 1
-$excel.Visible = [bool]$ShowExcel
-$excel.DisplayAlerts = $false
-$excel.ScreenUpdating = $false
-# Suppress every interactive prompt (update-links, AutoRecover, overwrite, events)
-# so a hidden modal dialog can never block COM automation and hang the run.
-try { $excel.AutomationSecurity = 1 } catch {}
-try { $excel.AskToUpdateLinks = $false } catch {}
-try { $excel.AlertBeforeOverwriting = $false } catch {}
-try { $excel.EnableEvents = $false } catch {}
-try { $excel.Interactive = $false } catch {}
-try { $excel.FeatureInstall = 0 } catch {}
+    # Writes header row + data block for one sheet, creates the table, and sets any formula cells
+    # (values that start with '=') AFTER the table exists so structured references resolve.
+    function Write-WARASheet {
+        param($Worksheet, [int]$StartRow, [string[]]$Columns, [object[]]$Rows, [string]$TableName, [string]$TableStyle = 'TableStyleLight19')
 
-try {
-    $wb = $excel.Workbooks.Open($workPath, 0, $false)
+        $colCount = $Columns.Count
+        $dataCount = @($Rows).Count
+        if ($dataCount -lt 1) { $dataCount = 1 }   # always at least one (blank) data row so the table is valid
 
-    Write-Host 'Writing 2.WorkloadInventory...' -ForegroundColor DarkCyan
-    $ws = $wb.Worksheets.Item($WorkloadInventorySheetRef)
-    Write-WARASheet -Worksheet $ws -StartRow 12 -Columns $colsInventory -Rows @($WorkloadInventory) -TableName 'InScopeResources' | Out-Null
-    Write-Host 'Writing 4.ImpactedResourcesAnalysis...' -ForegroundColor DarkCyan
-    $ws = $wb.Worksheets.Item($ImpactedResourcesSheetRef)
-    Write-WARASheet -Worksheet $ws -StartRow 12 -Columns $colsImpacted -Rows @($ImpactedResources) -TableName 'impactedresources' | Out-Null
-    Set-WARAListValidation   -Worksheet $ws -ColumnLetter 'A' -FirstRow 13 -Values @('Pending','Reviewed')
-    Set-WARAListValidation   -Worksheet $ws -ColumnLetter 'O' -FirstRow 13 -Values @('High','Medium','Low')
-    Set-WARALengthValidation -Worksheet $ws -ColumnLetter 'G' -FirstRow 13
-    # Conditional formatting is intentionally NOT added here: the shipped template
-    # (which we copy verbatim) already carries the 6 REQUIRED-ACTIONS colour rules
-    # on column A (A1:A1048576), so they apply to the newly written rows automatically.
+        # Clear any stale example content in the data region (values only; keep template formatting).
+        $clearLast = $StartRow + [Math]::Max($dataCount, 3000)
+        $Worksheet.Range($Worksheet.Cells.Item($StartRow, 1), $Worksheet.Cells.Item($clearLast, $colCount)).ClearContents() | Out-Null
 
-    Write-Host 'Writing 5.PlatformIssuesAnalysis...' -ForegroundColor DarkCyan
-    $ws = $wb.Worksheets.Item($PlatformIssuesSheetRef)
-    Write-WARASheet -Worksheet $ws -StartRow 12 -Columns $colsPlatform -Rows @($PlatformIssues) -TableName 'platformIssues' | Out-Null
-
-    Write-Host 'Writing 6.SupportRequestsAnalysis...' -ForegroundColor DarkCyan
-    $ws = $wb.Worksheets.Item($SupportRequestsSheetRef)
-    Write-WARASheet -Worksheet $ws -StartRow 12 -Columns $colsSupport -Rows @($SupportTickets) -TableName 'supportRequests' | Out-Null
-
-    Write-Host 'Writing 3.AnalysisPlanning...' -ForegroundColor DarkCyan
-    $ws = $wb.Worksheets.Item($AnalysisPlanningSheetRef)
-    Write-WARASheet -Worksheet $ws -StartRow 10 -Columns $colsAnalysis -Rows @($AnalysisPlanning) -TableName 'TableTypes8' | Out-Null
-
-    Write-Host 'Saving...' -ForegroundColor Cyan
-    $excel.Calculate()
-    $wb.SaveAs($workPath, 51)   # 51 = xlOpenXMLWorkbook
-    if (-not $ShowExcel) { $wb.Close($true) }
-    Write-Host "Saved: $OutputPath" -ForegroundColor Green
-}
-finally {
-    try { $excel.ScreenUpdating = $true } catch {}
-    if (-not $ShowExcel) {
-        # Release COM references (worksheet, workbook, then application) so Excel can
-        # actually exit; without this an orphaned EXCEL.EXE lingers holding the RCWs.
-        foreach ($ref in ,$ws + ,$wb) {
-            if ($ref) { try { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($ref) } catch {} }
+        # Header row (convert ImportExcel line-break token to a real newline for display).
+        for ($c = 0; $c -lt $colCount; $c++) {
+            $Worksheet.Cells.Item($StartRow, $c + 1).Value2 = ($Columns[$c] -replace '_x000a_', "`n")
         }
-        try { $excel.Quit() } catch {}
-        try { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($excel) } catch {}
-        $ws = $wb = $excel = $null
-        [GC]::Collect(); [GC]::WaitForPendingFinalizers()
-        [GC]::Collect(); [GC]::WaitForPendingFinalizers()
-        # Guarantee no orphaned EXCEL.EXE survives from this run.
-        if ($ownExcelPid) {
-            Get-Process -Id $ownExcelPid -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+        # Build a 2D value block; remember formula cells to set after the table exists.
+        $formulaCells = New-Object System.Collections.Generic.List[object]
+        $block = New-Object 'object[,]' $dataCount, $colCount
+        for ($r = 0; $r -lt @($Rows).Count; $r++) {
+            $row = $Rows[$r]
+            for ($c = 0; $c -lt $colCount; $c++) {
+                $val = $row.$($Columns[$c])
+                if ($val -is [string] -and $val.StartsWith('=')) {
+                    $formulaCells.Add([PSCustomObject]@{ R = $StartRow + 1 + $r; C = $c + 1; F = $val })
+                    $block[$r, $c] = $null
+                }
+                else {
+                    if ($null -ne $val -and $val -isnot [string]) { $val = [string]$val }
+                    $block[$r, $c] = $val
+                }
+            }
+        }
+        if (@($Rows).Count -ge 1) {
+            $topLeft = $Worksheet.Cells.Item($StartRow + 1, 1)
+            $botRight = $Worksheet.Cells.Item($StartRow + @($Rows).Count, $colCount)
+            # Use .Value (not .Value2): the Value2 property-put fails to marshal a 2D
+            # object[,] array in PowerShell COM ("Unable to cast object[,] to String").
+            $dataRange = $Worksheet.Range($topLeft, $botRight)
+            $dataRange.Value = $block
+        }
+
+        # Create (or replace) the table over header + data rows.
+        $lastRow = $StartRow + $dataCount
+        $tblRange = $Worksheet.Range($Worksheet.Cells.Item($StartRow, 1), $Worksheet.Cells.Item($lastRow, $colCount))
+        foreach ($existing in @($Worksheet.ListObjects)) {
+            if ($existing.Name -eq $TableName) { $existing.Unlist() }
+        }
+        $lo = $Worksheet.ListObjects.Add(1, $tblRange, $null, 1)   # xlSrcRange, headers = xlYes
+        $lo.Name = $TableName
+        try { $lo.TableStyle = $TableStyle } catch { Write-Verbose "TableStyle '$TableStyle' not applied: $($_.Exception.Message)" }
+
+        # Now set formula cells (table exists, so TableTypes8[[#This Row],...] structured refs resolve).
+        foreach ($fc in $formulaCells) {
+            try { $Worksheet.Cells.Item($fc.R, $fc.C).Formula2 = $fc.F }
+            catch {
+                try { $Worksheet.Cells.Item($fc.R, $fc.C).Formula = $fc.F }
+                catch { Write-Verbose "Formula not set at R$($fc.R)C$($fc.C): $($_.Exception.Message)" }
+            }
+        }
+    }
+
+    function Set-WARAListValidation {
+        param($Worksheet, [string]$ColumnLetter, [int]$FirstRow, [string[]]$Values)
+        $rng = $Worksheet.Range("$ColumnLetter$FirstRow`:$ColumnLetter`1048576")
+        $rng.Validation.Delete()
+        $rng.Validation.Add(3, 1, 1, ($Values -join ',')) | Out-Null   # 3 = xlValidateList, 1 = xlValidAlertStop
+    }
+
+    function Set-WARALengthValidation {
+        param($Worksheet, [string]$ColumnLetter, [int]$FirstRow)
+        $rng = $Worksheet.Range("$ColumnLetter$FirstRow`:$ColumnLetter`1048576")
+        $rng.Validation.Delete()
+        $rng.Validation.Add(6, 1, 5, '1') | Out-Null   # 6 = xlValidateTextLength, 1 = xlValidAlertStop, 5 = xlGreater
+    }
+
+    # Record the exact PID of the Excel instance we are about to spawn so cleanup can target ONLY
+    # that process. A COM-activated Excel launches as a new EXCEL.EXE; the PID that appears after
+    # New-Object (and is absent before) is unambiguously ours.
+    $excelPidsBefore = @(Get-Process EXCEL -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
+    $excel = New-Object -ComObject Excel.Application
+    $ownExcelPid = @(Get-Process EXCEL -ErrorAction SilentlyContinue |
+        Where-Object { $_.Id -notin $excelPidsBefore } | Select-Object -ExpandProperty Id) | Select-Object -First 1
+    $excel.Visible = [bool]$P.ShowExcel
+    $excel.DisplayAlerts = $false
+    $excel.ScreenUpdating = $false
+    # Suppress every interactive prompt (update-links, AutoRecover, overwrite, events) so a hidden
+    # modal dialog can never block COM automation and hang the worker.
+    try { $excel.AutomationSecurity = 1 } catch {}
+    try { $excel.AskToUpdateLinks = $false } catch {}
+    try { $excel.AlertBeforeOverwriting = $false } catch {}
+    try { $excel.EnableEvents = $false } catch {}
+    try { $excel.Interactive = $false } catch {}
+    try { $excel.FeatureInstall = 0 } catch {}
+
+    try {
+        $wb = $excel.Workbooks.Open($P.WorkPath, 0, $false)
+
+        $ws = $wb.Worksheets.Item($P.WorkloadInventorySheetRef)
+        Write-WARASheet -Worksheet $ws -StartRow 12 -Columns $P.ColsInventory -Rows @($P.WorkloadInventory) -TableName 'InScopeResources'
+
+        $ws = $wb.Worksheets.Item($P.ImpactedResourcesSheetRef)
+        Write-WARASheet -Worksheet $ws -StartRow 12 -Columns $P.ColsImpacted -Rows @($P.ImpactedResources) -TableName 'impactedresources'
+        Set-WARAListValidation   -Worksheet $ws -ColumnLetter 'A' -FirstRow 13 -Values @('Pending','Reviewed')
+        Set-WARAListValidation   -Worksheet $ws -ColumnLetter 'O' -FirstRow 13 -Values @('High','Medium','Low')
+        Set-WARALengthValidation -Worksheet $ws -ColumnLetter 'G' -FirstRow 13
+        # Conditional formatting is intentionally NOT added here: the shipped template (which we copy
+        # verbatim) already carries the 6 REQUIRED-ACTIONS colour rules on column A (A1:A1048576),
+        # so they apply to the newly written rows automatically.
+
+        $ws = $wb.Worksheets.Item($P.PlatformIssuesSheetRef)
+        Write-WARASheet -Worksheet $ws -StartRow 12 -Columns $P.ColsPlatform -Rows @($P.PlatformIssues) -TableName 'platformIssues'
+
+        $ws = $wb.Worksheets.Item($P.SupportRequestsSheetRef)
+        Write-WARASheet -Worksheet $ws -StartRow 12 -Columns $P.ColsSupport -Rows @($P.SupportTickets) -TableName 'supportRequests'
+
+        $ws = $wb.Worksheets.Item($P.AnalysisPlanningSheetRef)
+        Write-WARASheet -Worksheet $ws -StartRow 10 -Columns $P.ColsAnalysis -Rows @($P.AnalysisPlanning) -TableName 'TableTypes8'
+
+        $excel.Calculate()
+        $wb.SaveAs($P.WorkPath, 51)   # 51 = xlOpenXMLWorkbook
+        if (-not $P.ShowExcel) {
+            $wb.Close($true)
+            $excel.Quit()
+        }
+    }
+    finally {
+        if (-not $P.ShowExcel) {
+            # First try to close Excel gracefully (release refs -> GC -> Quit already issued above).
+            try { $excel.ScreenUpdating = $true } catch {}
+            foreach ($ref in ,$ws + ,$wb) {
+                if ($ref) { try { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($ref) } catch {} }
+            }
+            try { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($excel) } catch {}
+            $ws = $wb = $excel = $null
+            [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+
+            # Surgical safety net: on this machine a graceful Quit does not always terminate the
+            # automation instance. If OUR instance is still alive, terminate ONLY that exact PID --
+            # and only after re-confirming it is still an EXCEL.EXE launched with /automation. A
+            # user's manually-opened Excel is never an /automation instance and never has this PID,
+            # so it can never be affected.
+            if ($ownExcelPid) {
+                $stillOurs = Get-CimInstance Win32_Process -Filter "ProcessId=$ownExcelPid" -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -eq 'EXCEL.EXE' -and $_.CommandLine -like '*/automation*' }
+                if ($stillOurs) { Stop-Process -Id $ownExcelPid -Force -ErrorAction SilentlyContinue }
+            }
         }
     }
 }
 
-# Copy the finished workbook from the local temp file to the requested destination.
-if (-not $ShowExcel) {
-    Copy-Item -LiteralPath $workPath -Destination $OutputPath -Force
-    Remove-Item -LiteralPath $workPath -Force -ErrorAction SilentlyContinue
+$payload = @{
+    WorkPath                  = $workPath
+    ShowExcel                 = [bool]$ShowExcel
+    WorkloadInventorySheetRef = $WorkloadInventorySheetRef
+    ImpactedResourcesSheetRef = $ImpactedResourcesSheetRef
+    PlatformIssuesSheetRef    = $PlatformIssuesSheetRef
+    SupportRequestsSheetRef   = $SupportRequestsSheetRef
+    AnalysisPlanningSheetRef  = $AnalysisPlanningSheetRef
+    ColsInventory             = $colsInventory
+    ColsImpacted              = $colsImpacted
+    ColsPlatform              = $colsPlatform
+    ColsSupport               = $colsSupport
+    ColsAnalysis              = $colsAnalysis
+    WorkloadInventory         = $WorkloadInventory
+    ImpactedResources         = $ImpactedResources
+    PlatformIssues            = $PlatformIssues
+    SupportTickets            = $SupportTickets
+    AnalysisPlanning          = $AnalysisPlanning
 }
+
+if ($ShowExcel) {
+    Write-Host 'Writing workbook (Excel COM, visible window)...' -ForegroundColor Cyan
+    & $comWork $payload
+    Write-Host "Workbook is open in Excel (temporary file): $workPath" -ForegroundColor Green
+    return $workPath
+}
+
+Write-Host 'Writing workbook in a short-lived Excel COM worker process...' -ForegroundColor Cyan
+$job = Start-Job -ScriptBlock $comWork -ArgumentList $payload
+$completed = Wait-Job -Job $job -Timeout 600
+Receive-Job -Job $job    # surface worker output/errors (rethrows a terminating worker error here)
+$workerState = $job.State
+# The worker terminates its own /automation Excel before returning; removing the job just disposes it.
+Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+if (-not $completed) { throw "The Excel COM worker did not finish within the timeout and was stopped." }
+if ($workerState -eq 'Failed') { throw "The Excel COM worker process failed. See the errors above." }
+
+# Copy the finished workbook from the local temp file to the requested destination.
+Copy-Item -LiteralPath $workPath -Destination $OutputPath -Force
+Remove-Item -LiteralPath $workPath -Force -ErrorAction SilentlyContinue
+Write-Host "Saved: $OutputPath" -ForegroundColor Green
 
 return $OutputPath
 #endregion
