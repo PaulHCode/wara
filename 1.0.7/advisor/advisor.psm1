@@ -292,11 +292,9 @@ class advisorResourceObj : IComparable, IEquatable[object] {
 Function Get-WAFAdvisorMetadata {
     param($ResourceURL = ((Get-AzContext).Environment.ResourceManagerUrl) )
 
-    # Get an access token for the Azure REST API
-    $securetoken = Get-AzAccessToken -AsSecureString -ResourceUrl $ResourceURL -WarningAction SilentlyContinue
-
-    # Convert the secure token to a plain text token
-    $token = ConvertFrom-SecureString -SecureString $securetoken.token -AsPlainText
+    # Get an access token for the Azure REST API. Get-WAFArmAccessToken normalizes the Az.Accounts
+    # version difference (older returns a plain string token; newer returns a SecureString).
+    $token = Get-WAFArmAccessToken -ResourceUrl $ResourceURL
 
     # Create the authorization headers
     $authHeaders = @{

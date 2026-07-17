@@ -75,6 +75,7 @@
         'Invoke-WAFQuery',
         'Invoke-AzureRestApi',
         'Get-AzureRestMethodUriPath',
+        'Get-WAFArmAccessToken',
         'Import-WAFConfigFileData',
         'Connect-WAFAzure',
         'Test-WAFTagPattern',

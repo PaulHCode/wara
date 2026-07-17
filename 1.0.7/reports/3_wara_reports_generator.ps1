@@ -108,12 +108,15 @@ if (!$WorkloadName) {
 
 $TableStyle = 'Light19'
 
+# Excel COM helpers (Microsoft-only) that replace the ImportExcel/EPPlus operations for Phase 3.
+. "$PSScriptRoot/WARAReportExcelCom.ps1"
+
   ######################## REGULAR Functions ##########################
 
   function Test-ReviewedRecommendations {
     Param($ExcelFile)
 
-    $ExcelContent = Import-Excel -Path $ExcelFile -WorksheetName '4.ImpactedResourcesAnalysis' -StartRow 12
+    $ExcelContent = Import-WARAExcelViaCom -Path $ExcelFile -WorksheetName '4.ImpactedResourcesAnalysis' -StartRow 12
 
     if ( ($ExcelContent | Where-Object { $_.Impact -ne 'Low' -and $_.'REQUIRED ACTIONS / REVIEW STATUS' -ne 'Reviewed' -and ![String]::IsNullOrEmpty($_.'REQUIRED ACTIONS / REVIEW STATUS')}).count -ge 1)
       {
@@ -133,9 +136,9 @@ $TableStyle = 'Light19'
 
     $workingFolderPath = Get-Location
     $workingFolderPath = $workingFolderPath.Path
-    $ExcelPkg = Open-ExcelPackage -Path $AssessmentFindingsFile
     $NewAssessmentFindings = ($workingFolderPath + '\Assessment-Findings-Report-v1-' + (Get-Date -Format 'yyyy-MM-dd-HH-mm') + '.xlsx')
-    Close-ExcelPackage -ExcelPackage $ExcelPkg -SaveAs $NewAssessmentFindings
+    # Build-WARAAssessmentFindingsCom creates this file from the template (data sheets, pivots, charts);
+    # here we only compute the destination path.
 
     return $NewAssessmentFindings
   }
@@ -153,15 +156,19 @@ $TableStyle = 'Light19'
   }
 
   function Test-Requirement {
-    # Install required modules
+    # Phase 3 now reads and builds Excel via local Microsoft Excel (COM) instead of the third-party
+    # ImportExcel module. Verify desktop Excel can be started via COM.
     Write-Host "Validating " -NoNewline
-    Write-Host "ImportExcel" -ForegroundColor Cyan -NoNewline
-    Write-Host " Module.."
-    $ImportExcel = Get-Module -Name ImportExcel -ListAvailable -ErrorAction silentlycontinue
-    if ($null -eq $ImportExcel) {
-      # Do not auto-install from the PowerShell Gallery: it is unreachable in disconnected/sovereign
-      # environments and ImportExcel is not a Microsoft-authored module. Pre-stage it instead.
-      throw "The 'ImportExcel' module is required by the report generator but is not installed. In a disconnected environment, pre-stage it on a connected host (Save-Module -Name ImportExcel -Path <folder>) and copy it onto a PSModulePath directory, or install it from an internal PSRepository."
+    Write-Host "Microsoft Excel (COM)" -ForegroundColor Cyan -NoNewline
+    Write-Host " availability.."
+    try {
+      $probe = New-Object -ComObject Excel.Application
+      $null = $probe.Version
+      $probe.Quit()
+      [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($probe)
+    }
+    catch {
+      throw "Microsoft Excel (desktop) is required by the report generator but could not be started via COM. Install Microsoft 365 / Office desktop Excel on this machine and retry. Original error: $($_.Exception.Message)"
     }
   }
 
@@ -185,7 +192,7 @@ $TableStyle = 'Light19'
   function Get-ExcelImpactedResources {
     Param($ExcelFile)
 
-    $ExcelContent = Import-Excel -Path $ExcelFile -WorksheetName '4.ImpactedResourcesAnalysis' -StartRow 12
+    $ExcelContent = Import-WARAExcelViaCom -Path $ExcelFile -WorksheetName '4.ImpactedResourcesAnalysis' -StartRow 12
     #$ImpactedResources = $ExcelContent
 
     return $ExcelContent.where({![String]::IsNullOrEmpty($_."Resource Type")})
@@ -194,7 +201,7 @@ $TableStyle = 'Light19'
   function Get-ExcelWorkloadInventory {
     Param($ExcelFile)
 
-    $ExcelContent = Import-Excel -Path $ExcelFile -WorksheetName '2.WorkloadInventory' -StartRow 12
+    $ExcelContent = Import-WARAExcelViaCom -Path $ExcelFile -WorksheetName '2.WorkloadInventory' -StartRow 12
 
     return $ExcelContent
 
@@ -204,7 +211,7 @@ $TableStyle = 'Light19'
     Param($ExcelFile)
 
     try {
-      $PlatformIssues = Import-Excel -Path $ExcelFile -WorksheetName '5.PlatformIssuesAnalysis' -StartRow 12
+      $PlatformIssues = Import-WARAExcelViaCom -Path $ExcelFile -WorksheetName '5.PlatformIssuesAnalysis' -StartRow 12
     }
     catch {
       Write-Debug ((get-date -Format 'yyyy-MM-dd HH:mm:ss') + ' - Platform Issues not found in the Excel File..')
@@ -218,7 +225,7 @@ $TableStyle = 'Light19'
     Param($ExcelFile)
 
     try {
-      $SupportTickets = Import-Excel -Path $ExcelFile -WorksheetName "6.SupportRequestsAnalysis" -AsText 'Ticket ID' -StartRow 12
+      $SupportTickets = Import-WARAExcelViaCom -Path $ExcelFile -WorksheetName "6.SupportRequestsAnalysis" -AsText 'Ticket ID' -StartRow 12
     }
     catch {
       Write-Debug ((get-date -Format 'yyyy-MM-dd HH:mm:ss') + ' - Support Tickets not found in the Excel File..')
@@ -231,7 +238,7 @@ $TableStyle = 'Light19'
     Param($ExcelFile)
 
     try {
-      $Retirements = Import-Excel -Path $ExcelFile -WorksheetName "4.ImpactedResourcesAnalysis" -StartRow 12
+      $Retirements = Import-WARAExcelViaCom -Path $ExcelFile -WorksheetName "4.ImpactedResourcesAnalysis" -StartRow 12
       $Retirements = $Retirements | Where-Object {$_.Source -eq 'Azure Service Health - Service Retirements'}
     }
     catch {
@@ -993,55 +1000,8 @@ $TableStyle = 'Light19'
 
   }
 
-  function Export-ExcelImpactedResources {
-    Param($ImpactedResourcesFormatted)
-
-    $Style = @()
-    $Style += New-ExcelStyle -HorizontalAlignment Center -Range A:F
-    $Style += New-ExcelStyle -HorizontalAlignment Left -Range G:G
-    $Style += New-ExcelStyle -HorizontalAlignment Center -Range G12:G12
-    $Style += New-ExcelStyle -HorizontalAlignment Center -Range H:L
-    $Style += New-ExcelStyle -HorizontalAlignment Center -WrapText -Range M:M
-    $Style += New-ExcelStyle -HorizontalAlignment Center -Range N:N
-    $Style += New-ExcelStyle -HorizontalAlignment Center -WrapText -Range O:O
-    $Style += New-ExcelStyle -HorizontalAlignment Center -Range P:Q
-    $Style += New-ExcelStyle -HorizontalAlignment Center -WrapText -Range R:R
-    $Style += New-ExcelStyle -HorizontalAlignment Center -Range S:AA
-
-    $ImpactedResourcesSheet = New-Object System.Collections.Generic.List[System.Object]
-    $ImpactedResourcesSheet.Add('Impacted?')
-    $ImpactedResourcesSheet.Add('Resource Type')
-    $ImpactedResourcesSheet.Add('subscriptionId')
-    $ImpactedResourcesSheet.Add('resourceGroup')
-    $ImpactedResourcesSheet.Add('location')
-    $ImpactedResourcesSheet.Add('name')
-    $ImpactedResourcesSheet.Add('id')
-    $ImpactedResourcesSheet.Add('custom1')
-    $ImpactedResourcesSheet.Add('custom2')
-    $ImpactedResourcesSheet.Add('custom3')
-    $ImpactedResourcesSheet.Add('custom4')
-    $ImpactedResourcesSheet.Add('custom5')
-    $ImpactedResourcesSheet.Add('Recommendation Title')
-    $ImpactedResourcesSheet.Add('Impact')
-    $ImpactedResourcesSheet.Add('Recommendation Control')
-    $ImpactedResourcesSheet.Add('Potential Benefit')
-    $ImpactedResourcesSheet.Add('Learn More Link')
-    $ImpactedResourcesSheet.Add('Long Description')
-    $ImpactedResourcesSheet.Add('Guid')
-    $ImpactedResourcesSheet.Add('Category')
-    $ImpactedResourcesSheet.Add('Source')
-    $ImpactedResourcesSheet.Add('WAF Pillar')
-    $ImpactedResourcesSheet.Add('Platform Issue TrackingId')
-    $ImpactedResourcesSheet.Add('Retirement TrackingId')
-    $ImpactedResourcesSheet.Add('Support Request Number')
-    $ImpactedResourcesSheet.Add('Notes')
-    $ImpactedResourcesSheet.Add('checkName')
-
-    Write-Debug ((get-date -Format 'yyyy-MM-dd HH:mm:ss') + ' - Exporting Impacted Resources to Excel')
-    $ImpactedResourcesFormatted | ForEach-Object { [PSCustomObject]$_ } | Select-Object $ImpactedResourcesSheet |
-      Export-Excel -Path $NewAssessmentFindingsFile -WorksheetName '3.ImpactedResources' -TableName 'impactedresources' -TableStyle $TableStyle -Style $Style -StartRow 12
-
-  }
+  # NOTE: Export-ExcelImpactedResources removed — the '3.ImpactedResources' sheet is written via
+  # Excel COM in Build-WARAAssessmentFindingsCom (reports/WARAReportExcelCom.ps1) — no ImportExcel.
 
   function Initialize-ExcelRecommendations {
     Param($ImpactedResources)
@@ -1097,194 +1057,10 @@ $TableStyle = 'Light19'
 
   }
 
-  function Export-ExcelRecommendations {
-    Param($RecommendationsFormatted)
-
-    $Style = @()
-    $Style += New-ExcelStyle -HorizontalAlignment Center -Range A:A
-    $Style += New-ExcelStyle -HorizontalAlignment Left -Range B:C
-    $Style += New-ExcelStyle -HorizontalAlignment Center -Range B11:C11
-    $Style += New-ExcelStyle -HorizontalAlignment Center -Range D:D
-    $Style += New-ExcelStyle -HorizontalAlignment Left -Range E:E
-    $Style += New-ExcelStyle -HorizontalAlignment Center -Range E11:E11
-    $Style += New-ExcelStyle -HorizontalAlignment Center -Range F:F
-    $Style += New-ExcelStyle -HorizontalAlignment Left -WrapText -Range G:G
-    $Style += New-ExcelStyle -HorizontalAlignment Center -Range G11:G11
-    $Style += New-ExcelStyle -HorizontalAlignment Center -Range H:H
-    $Style += New-ExcelStyle -HorizontalAlignment Left -Range I:I
-    $Style += New-ExcelStyle -HorizontalAlignment Center -Range I11:I11
-    $Style += New-ExcelStyle -HorizontalAlignment Center -Range J:K
-    $Style += New-ExcelStyle -Range A11:K11 -FontColor White
-
-    $RecommendationSheet = New-Object System.Collections.Generic.List[System.Object]
-    $RecommendationSheet.Add('Impact')
-    $RecommendationSheet.Add('Description')
-    $RecommendationSheet.Add('Potential Benefit')
-    $RecommendationSheet.Add('Impacted Resources')
-    $RecommendationSheet.Add('Resource Type')
-    $RecommendationSheet.Add('Recommendation Control')
-    $RecommendationSheet.Add('Long Description')
-    $RecommendationSheet.Add('Category')
-    $RecommendationSheet.Add('Learn More Link')
-    $RecommendationSheet.Add('Guid')
-    $RecommendationSheet.Add('Notes')
-
-    Write-Debug ((get-date -Format 'yyyy-MM-dd HH:mm:ss') + ' - Exporting Recommendations to Excel')
-    $RecommendationsFormatted | ForEach-Object { [PSCustomObject]$_ } | Select-Object $RecommendationSheet |
-      Export-Excel -Path $NewAssessmentFindingsFile -WorksheetName '2.Recommendations' -TableName 'recommendationT' -TableStyle $TableStyle -Style $Style -StartRow 11
-
-  }
-
-  function Export-ExcelWorkloadInventory {
-    Param($ExcelWorkloadInventory)
-
-    $Style = @()
-    $Style += New-ExcelStyle -HorizontalAlignment Center
-
-    $WorkloadSheet = New-Object System.Collections.Generic.List[System.Object]
-    $WorkloadSheet.Add('id')
-    $WorkloadSheet.Add('name')
-    $WorkloadSheet.Add('type')
-    $WorkloadSheet.Add('tenantId')
-    $WorkloadSheet.Add('kind')
-    $WorkloadSheet.Add('location')
-    $WorkloadSheet.Add('resourceGroup')
-    $WorkloadSheet.Add('subscriptionId')
-    $WorkloadSheet.Add('managedBy')
-    $WorkloadSheet.Add('sku')
-    $WorkloadSheet.Add('plan')
-    $WorkloadSheet.Add('zones')
-
-    Write-Debug ((get-date -Format 'yyyy-MM-dd HH:mm:ss') + ' - Exporting Workload Inventory to Excel')
-    $ExcelWorkloadInventory | ForEach-Object { [PSCustomObject]$_ } | Select-Object $WorkloadSheet |
-      Export-Excel -Path $NewAssessmentFindingsFile -WorksheetName '6.WorkloadInventory' -TableName 'WorkloadResources' -TableStyle $TableStyle -Style $Style -StartRow 12
-
-  }
-
-  function Build-ExcelPivotTable {
-    Param($NewAssessmentFindingsFile)
-
-    # Open the Excel file to add the Pivot Tables and Charts
-    $Excel = Open-ExcelPackage -Path $NewAssessmentFindingsFile
-
-    $Address = $Excel.'2.Recommendations'.Tables[0].Address.Address
-
-    $PTParams = @{
-        PivotTableName    = 'P0'
-        Address           = $Excel.'7.PivotTable'.cells['A3']
-        SourceWorkSheet   = $Excel."2.Recommendations"
-        SourceRange       = $Address
-        PivotRows         = @('Resource Type')
-        PivotColumns      = @('Impact')
-        PivotData         = @{'Resource Type' = 'Count' }
-        PivotTableStyle   = 'Medium9'
-        Activate          = $true
-        PivotFilter       = 'Category'
-        ShowPercent       = $false
-        IncludePivotChart = $false
-    }
-    Add-PivotTable @PTParams
-
-    $PTParams = @{
-        PivotTableName    = 'P1'
-        Address           = $Excel.'7.PivotTable'.cells['H3']
-        SourceWorkSheet   = $Excel."2.Recommendations"
-        SourceRange       = $Address
-        PivotRows         = @('Recommendation Control')
-        PivotColumns      = @('Impact')
-        PivotData         = @{'Resource Type' = 'Count' }
-        PivotTableStyle   = 'Medium9'
-        Activate          = $true
-        PivotFilter       = 'Resource Type'
-        ShowPercent       = $false
-        IncludePivotChart = $false
-    }
-    Add-PivotTable @PTParams
-
-    $PTParams = @{
-        PivotTableName    = 'P2'
-        Address           = $Excel.'7.PivotTable'.cells['O3']
-        SourceWorkSheet   = $Excel."2.Recommendations"
-        SourceRange       = $Address
-        PivotRows         = @('Impact')
-        PivotData         = @{'Impacted Resources' = 'Sum' }
-        PivotTableStyle   = 'Medium9'
-        Activate          = $true
-        ShowPercent       = $false
-        IncludePivotChart = $false
-    }
-    Add-PivotTable @PTParams
-
-    $PTParams = @{
-        PivotTableName    = 'P3'
-        Address           = $Excel.'7.PivotTable'.cells['S3']
-        SourceWorkSheet   = $Excel."2.Recommendations"
-        SourceRange       = $Address
-        PivotRows         = @('Impact')
-        PivotData         = @{'Guid' = 'Count' }
-        PivotTableStyle   = 'Medium10'
-        Activate          = $true
-        ShowPercent       = $false
-        IncludePivotChart = $false
-    }
-    Add-PivotTable @PTParams
-
-    return $Excel
-
-}
-
-function Build-ExcelPivotChart {
-    Param($Excel)
-
-    $ChartP0 = $Excel."1.Dashboard".Drawings.AddChart('ChartP0', 'BarClustered', $Excel."7.PivotTable".PivotTables['P0'])
-    $ChartP0.SetSize(600, 700)
-    $ChartP0.SetPosition(18, 10, .5, 90)
-    $ChartP0.fill.color = [System.Drawing.Color]::FromArgb(255,194,194,194)
-    $ChartP0.PlotArea.fill.color = [System.Drawing.Color]::FromArgb(255,194,194,194)
-    $ChartP0.RoundedCorners = $true
-    $ChartP0.Legend.Position = 'Top'
-    #$ChartP0.DisplayBlanksAs = 'Gap'
-
-    $ChartP0.Title.Font.Bold = $true
-    $ChartP0.Title.Font.SetFromFont("Segoe UI")
-    $ChartP0.Title.Font.Size = 11
-    $ChartP0.Title.Text = 'Recommendations by Impact per ResourceType'
-
-    $ChartP0.XAxis.Title.Font.SetFromFont('Segoe UI')
-    $ChartP0.XAxis.Title.Font.Size = 9
-    $ChartP0.XAxis.MinorTickMark = "None"
-    $ChartP0.XAxis.MajorTickMark = "None"
-
-    $ChartP0.YAxis.Title.Font.SetFromFont('Segoe UI')
-    $ChartP0.YAxis.Title.Font.Size = 9
-    $ChartP0.YAxis.MinorTickMark = "None"
-    $ChartP0.YAxis.MajorTickMark = "None"
-
-    $ChartP1 = $Excel."1.Dashboard".Drawings.AddChart('ChartP1', 'BarClustered', $Excel."7.PivotTable".PivotTables['P1'])
-    $ChartP1.SetSize(500, 700)
-    $ChartP1.SetPosition(18, 10, 6, 75)
-    $ChartP1.fill.color = [System.Drawing.Color]::FromArgb(255,194,194,194)
-    $ChartP1.PlotArea.fill.color = [System.Drawing.Color]::FromArgb(255,194,194,194)
-    $ChartP1.RoundedCorners = $true
-    $ChartP1.Legend.Position = 'Top'
-    #$ChartP1.DisplayBlanksAs = 'Gap'
-
-    $ChartP1.Title.Font.Bold = $true
-    $ChartP1.Title.Font.SetFromFont("Segoe UI")
-    $ChartP1.Title.Font.Size = 11
-    $ChartP1.Title.Text = 'Recommendations by Impact per Category'
-
-    $ChartP1.XAxis.Title.Font.SetFromFont('Segoe UI')
-    $ChartP1.XAxis.Title.Font.Size = 9
-    $ChartP1.XAxis.MinorTickMark = "None"
-
-    $ChartP1.YAxis.Title.Font.SetFromFont('Segoe UI')
-    $ChartP1.YAxis.Title.Font.Size = 9
-    $ChartP1.YAxis.MinorTickMark = "None"
-
-    Close-ExcelPackage $Excel
-
-}
+  # NOTE: Export-ExcelRecommendations, Export-ExcelWorkloadInventory, Build-ExcelPivotTable and
+  # Build-ExcelPivotChart were removed. The Assessment-Findings workbook (data sheets + tables), its
+  # pivot tables (P0-P3) and its charts (ChartP0/ChartP1) are now built with local Microsoft Excel
+  # via COM in Build-WARAAssessmentFindingsCom (reports/WARAReportExcelCom.ps1) — no ImportExcel.
 
 # Start the stopwatch to time the script
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
@@ -1298,19 +1074,20 @@ Write-Host " "
 $CoreFile = get-item -Path $ExpertAnalysisFile
 $CoreFile = $CoreFile.FullName
 
+# Read the Expert-Analysis worksheets once via Excel COM (replaces ImportExcel; no third-party module).
+Initialize-WARAExpertAnalysisCache -Path $CoreFile -Sheets @(
+    @{ Name = '4.ImpactedResourcesAnalysis'; StartRow = 12 },
+    @{ Name = '2.WorkloadInventory';         StartRow = 12 },
+    @{ Name = '5.PlatformIssuesAnalysis';    StartRow = 12 },
+    @{ Name = '6.SupportRequestsAnalysis';   StartRow = 12; AsText = @('Ticket ID') }
+)
+
 Test-ReviewedRecommendations -ExcelFile $CoreFile
 
 Write-Debug (' ---------------------------------- STARTING REPORT GENERATOR SCRIPT --------------------------------------- ')
 Write-Debug ((get-date -Format 'yyyy-MM-dd HH:mm:ss') + ' - Starting Report Generator Script..')
 Write-Debug ((get-date -Format 'yyyy-MM-dd HH:mm:ss') + ' - Script Version: ' + $Version)
 Write-Debug ((get-date -Format 'yyyy-MM-dd HH:mm:ss') + ' - Excel File: ' + $ExpertAnalysisFile)
-$ImportExcel = Get-Module -Name ImportExcel -ListAvailable -ErrorAction silentlycontinue
-foreach ($IExcel in $ImportExcel) {
-    $IExcelPath = $IExcel.Path
-    $IExcelVer = [string]$IExcel.Version
-    Write-Debug ((get-date -Format 'yyyy-MM-dd HH:mm:ss') + ' - ImportExcel Module Path: ' + $IExcelPath)
-    Write-Debug ((get-date -Format 'yyyy-MM-dd HH:mm:ss') + ' - ImportExcel Module Version: ' + $IExcelVer)
-}
 
 Write-Progress -Id 1 -activity "Processing Office Apps" -Status "10% Complete." -PercentComplete 10
 Test-Requirement
@@ -1359,16 +1136,15 @@ $ResourcesTypes = $TempImpactedResources | Group-Object -Property 'Resource Type
 Write-Debug ((get-date -Format 'yyyy-MM-dd HH:mm:ss') + ' - Starting to Process Assessment Findings..')
 
 $ImpactedResourcesFormatted = Initialize-ExcelImpactedResources -ImpactedResources $ExcelImpactedResources
-Export-ExcelImpactedResources -ImpactedResourcesFormatted $ImpactedResourcesFormatted
-
 $RecommendationsFormatted = Initialize-ExcelRecommendations -ImpactedResources $ExcelImpactedResources
-Export-ExcelRecommendations -RecommendationsFormatted $RecommendationsFormatted
 
-Export-ExcelWorkloadInventory -ExcelWorkloadInventory $ExcelWorkloadInventory
-
-$ExcelFileLive = Build-ExcelPivotTable -NewAssessmentFindingsFile $NewAssessmentFindingsFile
-
-Build-ExcelPivotChart -Excel $ExcelFileLive
+# Build the entire Assessment-Findings workbook (data sheets + tables + pivots + charts) with Excel COM.
+$null = Build-WARAAssessmentFindingsCom `
+    -TemplatePath $AssessmentFindingsFile `
+    -OutputPath $NewAssessmentFindingsFile `
+    -ImpactedResources @($ImpactedResourcesFormatted | ForEach-Object { [PSCustomObject]$_ }) `
+    -Recommendations @($RecommendationsFormatted | ForEach-Object { [PSCustomObject]$_ }) `
+    -WorkloadInventory @($ExcelWorkloadInventory | ForEach-Object { [PSCustomObject]$_ })
 
 Write-Debug ((get-date -Format 'yyyy-MM-dd HH:mm:ss') + ' - Starting PowerPoint..')
 # Openning PPT

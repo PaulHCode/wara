@@ -11,7 +11,7 @@
     RootModule        = 'wara.psm1'
 
     # Version number of this module.
-    ModuleVersion     = '1.0.6'
+    ModuleVersion     = '1.0.7'
 
     # Supported PSEditions
     CompatiblePSEditions = 'Core'
@@ -51,8 +51,7 @@
 
     # Modules that must be imported into the global environment prior to importing this module
     RequiredModules = @(
-        @{ ModuleName = 'Az.Accounts'; ModuleVersion = '3.0.0' },
-        @{ ModuleName = 'Az.ResourceGraph'; ModuleVersion = '1.0.0' }
+        @{ ModuleName = 'Az.Accounts'; ModuleVersion = '3.0.0' }
     )
 
     # Assemblies that must be loaded prior to importing this module
