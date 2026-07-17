@@ -1071,8 +1071,14 @@ Write-Host "Version: " -NoNewline
 Write-Host $Version -ForegroundColor DarkBlue -NoNewline
 Write-Host " "
 
-$CoreFile = get-item -Path $ExpertAnalysisFile
-$CoreFile = $CoreFile.FullName
+$ExpertAnalysisSourceFile = (Get-Item -Path $ExpertAnalysisFile).FullName
+
+# Excel COM cannot reliably open a workbook that lives on an actively-syncing OneDrive path (the open is
+# rejected with RPC_E_CALL_REJECTED / forced into Protected View, which aborts the read). Work from a
+# local temp copy of the Expert-Analysis workbook and read everything from there.
+$CoreFile = Join-Path $env:TEMP ('WARA-ExpertAnalysis-' + [guid]::NewGuid().ToString('N') + '.xlsx')
+Copy-Item -LiteralPath $ExpertAnalysisSourceFile -Destination $CoreFile -Force
+try { Unblock-File -LiteralPath $CoreFile -ErrorAction SilentlyContinue } catch {}
 
 # Read the Expert-Analysis worksheets once via Excel COM (replaces ImportExcel; no third-party module).
 Initialize-WARAExpertAnalysisCache -Path $CoreFile -Sheets @(
@@ -1112,6 +1118,9 @@ $ExcelWorkloadInventory = Get-ExcelWorkloadInventory -ExcelFile $CoreFile
 Write-Progress -Id 1 -activity "Processing Office Apps" -Status "40% Complete." -PercentComplete 40
 
 $ExcelRetirements = Get-ExcelRetirement -ExcelFile $CoreFile
+
+# Done reading the Expert-Analysis workbook; remove the local temp copy.
+Remove-Item -LiteralPath $CoreFile -Force -ErrorAction SilentlyContinue
 
 Write-Progress -Id 1 -activity "Processing Office Apps" -Status "45% Complete." -PercentComplete 45
 

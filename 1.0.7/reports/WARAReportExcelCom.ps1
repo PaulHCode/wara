@@ -33,11 +33,29 @@ $script:xlLegendTop   = -4160
 # In-memory cache of Expert-Analysis worksheet reads (populated by Initialize-WARAExpertAnalysisCache).
 $script:WARAExcelReadCache = @{}
 
+function Invoke-WARAComRetry {
+    # Retries a COM operation that can transiently fail (RPC_E_CALL_REJECTED / 'call was rejected by
+    # callee', server busy, or a flaky Excel launch right after another Excel instance was torn down)
+    # a few times with a short delay before giving up.
+    param(
+        [Parameter(Mandatory)][scriptblock]$Action,
+        [int]$MaxAttempts = 6,
+        [int]$DelayMs = 1500
+    )
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        try { return & $Action }
+        catch {
+            if ($attempt -ge $MaxAttempts) { throw }
+            Start-Sleep -Milliseconds $DelayMs
+        }
+    }
+}
+
 function New-WARAExcelApp {
     # Starts a hidden Excel automation instance with all interactive prompts suppressed and returns
     # @{ App = <comobject>; OwnPid = <int> } so the caller can terminate exactly the spawned process.
     $before = @(Get-Process EXCEL -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
-    $app = New-Object -ComObject Excel.Application
+    $app = Invoke-WARAComRetry { New-Object -ComObject Excel.Application }
     $ownPid = @(Get-Process EXCEL -ErrorAction SilentlyContinue | Where-Object { $_.Id -notin $before } | Select-Object -ExpandProperty Id) | Select-Object -First 1
     $app.Visible = $false
     $app.DisplayAlerts = $false
@@ -121,7 +139,7 @@ function Initialize-WARAExpertAnalysisCache {
     Unblock-File -LiteralPath $Path -ErrorAction SilentlyContinue
     $handle = New-WARAExcelApp
     try {
-        $wb = $handle.App.Workbooks.Open($Path, 0, $true)   # ReadOnly
+        $wb = Invoke-WARAComRetry { $handle.App.Workbooks.Open($Path, 0, $true) }   # ReadOnly
         foreach ($s in $Sheets) {
             $asText = if ($s.ContainsKey('AsText')) { @($s.AsText) } else { @() }
             try {
@@ -154,7 +172,7 @@ function Import-WARAExcelViaCom {
     Unblock-File -LiteralPath $Path -ErrorAction SilentlyContinue
     $handle = New-WARAExcelApp
     try {
-        $wb = $handle.App.Workbooks.Open($Path, 0, $true)
+        $wb = Invoke-WARAComRetry { $handle.App.Workbooks.Open($Path, 0, $true) }
         $data = Read-WARAWorksheetObjects -Workbook $wb -WorksheetName $WorksheetName -StartRow $StartRow -AsText $AsText
         try { $wb.Close($false) } catch {}
         return , @($data)
