@@ -163,6 +163,7 @@ function Start-WARACollector {
     # Check for module updates. In disconnected / sovereign environments (e.g. USNAT) the PowerShell
     # Gallery is not reachable, so this is best-effort only: it never throws, and can be bypassed
     # entirely with -SkipVersionCheck.
+    <#
     if (-not $SkipVersionCheck) {
         try {
             Write-Host 'Checking Version..' -ForegroundColor Cyan
@@ -177,6 +178,7 @@ function Start-WARACollector {
             Write-Verbose "Version check skipped - module repository not reachable: $($_.Exception.Message)"
         }
     }
+    #>
 
     # Start the stopwatch to time the script
     $stopWatch = [System.Diagnostics.Stopwatch]::StartNew()

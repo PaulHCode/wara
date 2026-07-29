@@ -90,23 +90,168 @@ function Invoke-WAFQuery {
         [string] $Query = 'resources | project name, type, location, resourceGroup, subscriptionId, id'
     )
 
-    $result = $SubscriptionIds ? (Search-AzGraph -Query $Query -First 1000 -Subscription $SubscriptionIds) : (Search-AzGraph -Query $Query -First 1000 -UseTenantScope) # -first 1000 returns the first 1000 results and subsequently reduces the amount of queries required to get data.
+    # REST replacement for Search-AzGraph (removes the Az.ResourceGraph dependency). The ARM endpoint
+    # is taken from the current Az context so this works in any registered cloud (USNAT/USSec/USGov/...).
+    $armUrl = (Get-AzContext).Environment.ResourceManagerUrl
+    $argUri = ($armUrl.TrimEnd('/')) + '/providers/Microsoft.ResourceGraph/resources?api-version=2021-03-01'
 
-    # Collection to store all resources
-    $allResources = @($result)
+    # -First 1000 in the original maps to options.$top; objectArray matches Search-AzGraph's row shape.
+    $options = [ordered]@{ '$top' = 1000; 'resultFormat' = 'objectArray' }
+    $bodyObj = [ordered]@{ query = $Query; options = $options }
+    if ($SubscriptionIds) { $bodyObj['subscriptions'] = @($SubscriptionIds) }
+    # When no subscriptions are supplied the original used -UseTenantScope; omitting 'subscriptions'
+    # makes Resource Graph query every subscription the signed-in user can read (equivalent scope).
 
-    # Loop to paginate through the results using the skip token
-    $result = while ($result.SkipToken) {
-        # Retrieve the next set of results using the skip token
-        $result = $SubscriptionIds ? (Search-AzGraph -Query $Query -SkipToken $result.SkipToken -Subscription $SubscriptionIds -First 1000) : (Search-AzGraph -Query $Query -SkipToken $result.SkipToken -First 1000 -UseTenantScope)
-        # Add the results to the collection
-        Write-Output $result
+    $allResources = [System.Collections.Generic.List[object]]::new()
+
+    do {
+        $token = Get-WAFArmAccessToken -ResourceUrl $armUrl
+        $headers = @{ Authorization = "Bearer $token" }
+        $body = $bodyObj | ConvertTo-Json -Depth 20 -Compress
+
+        $resp = Invoke-WAFWebRequest -Method 'POST' -Uri $argUri -Headers $headers -Body $body
+        $parsed = $resp.Content | ConvertFrom-Json
+
+        if ($null -ne $parsed.data) {
+            foreach ($row in @($parsed.data)) {
+                # Search-AzGraph adds a synthetic 'ResourceId' NoteProperty (equal to the 'id' column)
+                # to every returned row. Replicate it so raw query output (e.g. resourceInventory) is
+                # identical to the Az.ResourceGraph path. Nothing reads this property in code; it only
+                # affects the shape of rows surfaced verbatim in the collector JSON.
+                if (($row.PSObject.Properties.Name -contains 'id') -and -not ($row.PSObject.Properties.Name -contains 'ResourceId')) {
+                    $row | Add-Member -MemberType NoteProperty -Name 'ResourceId' -Value $row.id -Force
+                }
+                $allResources.Add($row)
+            }
+        }
+
+        # ARG returns the continuation token as '$skipToken' (older) or 'skipToken' depending on version.
+        $skipToken = $parsed.'$skipToken'
+        if ([string]::IsNullOrEmpty($skipToken)) { $skipToken = $parsed.skipToken }
+        $options['$skipToken'] = $skipToken
+        $bodyObj['options'] = $options
+    } while (-not [string]::IsNullOrEmpty($skipToken))
+
+    # Output all resources (comma keeps the array intact through the pipeline, matching the original).
+    return , $allResources.ToArray()
+}
+
+<#
+.SYNOPSIS
+    Acquires an ARM bearer access token for the current signed-in user, tolerant of Az.Accounts version differences.
+
+.DESCRIPTION
+    Wraps Get-AzAccessToken so the rest of the module can build 'Authorization: Bearer' headers without
+    caring which Az.Accounts version is installed. Older versions return the token as a plain [string];
+    newer versions (Az.Accounts 5.0+/Az 13) return it as a [SecureString] by default. This helper detects
+    the type at runtime and always returns a plain string. It deliberately does NOT pass -AsSecureString
+    (that switch is absent on older versions and would fail there). Az.Accounts handles token caching and
+    silent refresh, so callers can simply request a token whenever they need one.
+
+.PARAMETER ResourceUrl
+    The resource/audience the token is for. Defaults to the current context's ResourceManagerUrl (ARM),
+    which is also the correct audience for Resource Graph, Advisor, and Resource Health calls.
+
+.OUTPUTS
+    System.String. The raw bearer token.
+#>
+function Get-WAFArmAccessToken {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param (
+        [Parameter(Mandatory = $false)]
+        [string] $ResourceUrl
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ResourceUrl)) {
+        $ResourceUrl = (Get-AzContext).Environment.ResourceManagerUrl
     }
 
-    $allResources += $result
+    # Do not pass -AsSecureString: it does not exist on older Az.Accounts and would throw there.
+    $raw = Get-AzAccessToken -ResourceUrl $ResourceUrl -WarningAction SilentlyContinue -ErrorAction Stop
 
-    # Output all resources
-    return , $allResources
+    $tok = $raw.Token
+    if ($tok -is [System.Security.SecureString]) {
+        # Portable decode (works on Windows PowerShell 5.1 and PowerShell 7). Kept in a local only.
+        return [System.Net.NetworkCredential]::new('', $tok).Password
+    }
+    return [string]$tok
+}
+
+<#
+.SYNOPSIS
+    Invokes a web request with retry/backoff for throttling (HTTP 429) and transient 5xx responses.
+
+.DESCRIPTION
+    Shared transport for the REST replacements of Search-AzGraph and Invoke-AzRestMethod. Uses
+    Invoke-WebRequest (-UseBasicParsing) so the caller receives the raw response body via .Content,
+    matching what Invoke-AzRestMethod exposed. Honors a Retry-After header when present, otherwise
+    falls back to capped exponential backoff. Throws on non-retryable failures or once retries are
+    exhausted.
+
+.OUTPUTS
+    The Invoke-WebRequest response object (exposes .StatusCode, .Content, .Headers).
+#>
+function Invoke-WAFWebRequest {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('GET', 'POST', 'PUT', 'PATCH', 'DELETE')]
+        [string] $Method,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Uri,
+
+        [Parameter(Mandatory = $false)]
+        [hashtable] $Headers = @{},
+
+        [Parameter(Mandatory = $false)]
+        [string] $Body,
+
+        [Parameter(Mandatory = $false)]
+        [int] $MaxRetry = 5
+    )
+
+    $attempt = 0
+    while ($true) {
+        $attempt++
+        try {
+            $params = @{
+                Method          = $Method
+                Uri             = $Uri
+                Headers         = $Headers
+                UseBasicParsing = $true
+                ErrorAction     = 'Stop'
+            }
+            if (-not [string]::IsNullOrEmpty($Body)) {
+                $params.Body = $Body
+                $params.ContentType = 'application/json'
+            }
+            return Invoke-WebRequest @params
+        }
+        catch {
+            $statusCode = 0
+            $retryAfter = 0
+            $response = $_.Exception.Response
+            if ($null -ne $response) {
+                try { $statusCode = [int]$response.StatusCode } catch {}
+                try {
+                    $ra = $response.Headers['Retry-After']
+                    if ($ra) { $retryAfter = [int]$ra }
+                }
+                catch {}
+            }
+
+            $retryable = ($statusCode -eq 429) -or ($statusCode -ge 500 -and $statusCode -lt 600)
+            if ($retryable -and $attempt -le $MaxRetry) {
+                if ($retryAfter -le 0) { $retryAfter = [int][Math]::Min(30, [Math]::Pow(2, $attempt)) }
+                Write-Verbose "Invoke-WAFWebRequest: HTTP $statusCode on attempt $attempt; retrying in ${retryAfter}s."
+                Start-Sleep -Seconds $retryAfter
+                continue
+            }
+            throw
+        }
+    }
 }
 
 <#
@@ -157,7 +302,7 @@ function Invoke-WAFQuery {
 #>
 function Invoke-AzureRestApi {
     [CmdletBinding()]
-    [OutputType([Microsoft.Azure.Commands.Profile.Models.PSHttpResponse])]
+    [OutputType([pscustomobject])]
     param (
         [Parameter(ParameterSetName = 'WithResourceGroup', Mandatory = $true)]
         [Parameter(ParameterSetName = 'WithoutResourceGroup', Mandatory = $true)]
@@ -210,13 +355,24 @@ function Invoke-AzureRestApi {
     if ($PSBoundParameters.ContainsKey('QueryString')) { $cmdletParams.QueryString = $QueryString }
     $path = Get-AzureRestMethodUriPath @cmdletParams
 
-    # Invoke the Azure REST API using the URI path.
-    $cmdletParams = @{
-        Method = $Method
-        Path   = $path
+    # REST replacement for Invoke-AzRestMethod (removes the reliance on that cmdlet for data calls).
+    # Build the full ARM URL from the current context's ResourceManagerUrl and call it directly with a
+    # bearer token. The returned object exposes the same .Content (raw JSON string) that callers consume
+    # via ($response.Content | ConvertFrom-Json), so downstream modules need no changes.
+    $armUrl = (Get-AzContext).Environment.ResourceManagerUrl
+    $uri = ($armUrl.TrimEnd('/')) + $path
+    $token = Get-WAFArmAccessToken -ResourceUrl $armUrl
+    $headers = @{ Authorization = "Bearer $token" }
+
+    $webParams = @{ Method = $Method; Uri = $uri; Headers = $headers }
+    if ($PSBoundParameters.ContainsKey('RequestBody')) { $webParams.Body = $RequestBody }
+    $response = Invoke-WAFWebRequest @webParams
+
+    return [pscustomobject]@{
+        StatusCode = [int]$response.StatusCode
+        Content    = [string]$response.Content
+        Headers    = $response.Headers
     }
-    if ($PSBoundParameters.ContainsKey('RequestBody')) { $cmdletParams.Payload = $RequestBody }
-    return Invoke-AzRestMethod @cmdletParams
 }
 
 <#
