@@ -213,7 +213,12 @@ function Write-WARAFindingsSheet {
             for ($c = 0; $c -lt $colCount; $c++) {
                 $name = $Columns[$c]
                 $val = if ($row -is [System.Collections.IDictionary]) { $row[$name] } else { $row.$name }
-                if ($null -ne $val -and $val -isnot [string]) { $val = [string]$val }
+                if ($name -eq 'Impacted Resources' -and $null -eq $val -and -not [string]::IsNullOrWhiteSpace([string]$val)){
+                    $val = [double]$val
+                }
+                elseif ($null -ne $val -and $val -isnot [string]){
+                    $val = [string]$val
+                }
                 $block[$r, $c] = $val
             }
         }
@@ -233,7 +238,7 @@ function Write-WARAFindingsSheet {
 }
 
 function Add-WARAPivot {
-    # Creates one pivot table from a source Range onto a destination cell, with row/col/page/data config.
+    # Creates one pivot table from a source table/Range reference onto a destination cell, with row/col/page/data config.
     param(
         $Workbook, $DestCell, [string]$Name, $SourceRange,
         [string[]]$Rows = @(), [string[]]$Columns = @(), [string]$PageField,
@@ -261,7 +266,8 @@ function Add-WARAPivotChart {
     try {
         $chart.HasTitle = $true
         $chart.ChartTitle.Text = $Title
-    } catch {}
+    } 
+    catch {}
     try { $chart.HasLegend = $true; $chart.Legend.Position = $script:xlLegendTop } catch {}
     # Light grey chart/plot area to match the original dashboard styling (cosmetic).
     $grey = 194 + (194 * 256) + (194 * 65536)
@@ -300,14 +306,19 @@ function Build-WARAAssessmentFindingsCom {
         Write-WARAFindingsSheet -Worksheet $wsImpacted -StartRow 12 -Columns $colsImpacted -Rows @($ImpactedResources) -TableName 'impactedresources' | Out-Null
 
         $wsReco = $wb.Worksheets.Item('2.Recommendations')
-        $recoTable = Write-WARAFindingsSheet -Worksheet $wsReco -StartRow 11 -Columns $colsReco -Rows @($Recommendations) -TableName 'recommendationT'
+        Write-WARAFindingsSheet -Worksheet $wsReco -StartRow 11 -Columns $colsReco -Rows @($Recommendations) -TableName 'recommendationT' | Out-Null
 
         $wsInv = $wb.Worksheets.Item('6.WorkloadInventory')
         Write-WARAFindingsSheet -Worksheet $wsInv -StartRow 12 -Columns $colsInv -Rows @($WorkloadInventory) -TableName 'WorkloadResources' | Out-Null
 
         # Pivot tables on 7.PivotTable, sourced from the 2.Recommendations table.
         $wsPivot = $wb.Worksheets.Item('7.PivotTable')
-        $src = $recoTable.Range
+        foreach($existingPivot in @($wsPivot.PivotTables())) {
+            If($existingPivot.Name -in @('P0', 'P1', 'P2', 'P3')){
+                try {$existingPivot.TableRange2.Clear() | Out-Null} catch{}
+            }
+        }
+        $src = 'recommendationT'
         $p0 = Add-WARAPivot -Workbook $wb -DestCell $wsPivot.Range('A3') -Name 'P0' -SourceRange $src -Rows @('Resource Type') -Columns @('Impact') -PageField 'Category' -DataField 'Resource Type' -DataFunction $script:xlCount -Style 'PivotStyleMedium9'
         $p1 = Add-WARAPivot -Workbook $wb -DestCell $wsPivot.Range('H3') -Name 'P1' -SourceRange $src -Rows @('Recommendation Control') -Columns @('Impact') -PageField 'Resource Type' -DataField 'Resource Type' -DataFunction $script:xlCount -Style 'PivotStyleMedium9'
         $null = Add-WARAPivot -Workbook $wb -DestCell $wsPivot.Range('O3') -Name 'P2' -SourceRange $src -Rows @('Impact') -DataField 'Impacted Resources' -DataFunction $script:xlSum -Style 'PivotStyleMedium9'
